@@ -2799,6 +2799,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
+			if msg.String() == "ctrl+t" {
+				// make line task/todo — Ctrl+T
+				lineIdx := m.noteInput.Line()
+				val := m.noteInput.Value()
+				lines := strings.Split(val, "\n")
+				if lineIdx >= 0 && lineIdx < len(lines) {
+					lines[lineIdx] = toggleTaskLine(lines[lineIdx])
+					newVal := strings.Join(lines, "\n")
+					m.noteInput.SetValue(newVal)
+					if m.currentCategoryIndex >= 0 && m.currentCategoryIndex < len(m.noteCategories) {
+						m.noteCategories[m.currentCategoryIndex].content = newVal
+					}
+					m.noteSaveSeq++
+					m.noteHasUnsavedChanges = true
+					// keep cursor on same line
+					m.lastAction = "Task toggled — line " + strconv.Itoa(lineIdx+1) + " (Ctrl+T)"
+					return m, tea.Batch(debounceNoteSave(m.noteSaveSeq), saveNotesCmd(newVal))
+				}
+				return m, nil
+			}
 			prev := m.noteInput.Value()
 			var noteCmd tea.Cmd
 			m.noteInput, noteCmd = m.noteInput.Update(msg)
@@ -4145,6 +4165,96 @@ func noteShortcutsTable(width int) string {
 	return lipgloss.JoinVertical(lipgloss.Top, title, b.String())
 }
 
+func isTaskLine(line string) bool {
+	trim := strings.TrimSpace(line)
+	return strings.HasPrefix(trim, "- [ ]") || strings.HasPrefix(trim, "- [x]") || strings.HasPrefix(trim, "- [X]") || strings.HasPrefix(trim, "☐") || strings.HasPrefix(trim, "☑")
+}
+
+func toggleTaskLine(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	leading := line[:len(line)-len(trimmed)]
+	trim := strings.TrimSpace(trimmed)
+	if strings.HasPrefix(trim, "- [ ]") {
+		return leading + "- [x] " + strings.TrimSpace(trim[5:])
+	}
+	if strings.HasPrefix(trim, "- [x]") || strings.HasPrefix(trim, "- [X]") {
+		return leading + strings.TrimSpace(trim[5:])
+	}
+	if strings.HasPrefix(trim, "☐") {
+		return leading + "☑ " + strings.TrimSpace(trim[2:])
+	}
+	if strings.HasPrefix(trim, "☑") {
+		return leading + strings.TrimSpace(trim[2:])
+	}
+	if trim == "" {
+		return leading + "- [ ] "
+	}
+	return leading + "- [ ] " + trim
+}
+
+func renderStickyNotes(m model, width int) string {
+	if len(m.noteCategories) == 0 {
+		return ""
+	}
+	// each category = 1 sticky note box
+	var stickies []string
+	for _, cat := range m.noteCategories {
+		tasks := []string{}
+		for _, line := range strings.Split(cat.content, "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			// show tasks and plain lines as sticky content, but highlight tasks
+			tasks = append(tasks, truncateString(strings.TrimSpace(line), 28))
+			if len(tasks) >= 5 {
+				break
+			}
+		}
+		if len(tasks) == 0 {
+			tasks = []string{lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(empty)")}
+		} else {
+			// style tasks with checkbox colors
+			for i, t := range tasks {
+				if strings.HasPrefix(strings.TrimSpace(t), "- [ ]") || strings.HasPrefix(strings.TrimSpace(t), "☐") {
+					tasks[i] = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Render("☐ "+strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(t), "- [ ]")))
+					if strings.HasPrefix(strings.TrimSpace(t), "☐") {
+						tasks[i] = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Render(t)
+					}
+				} else if strings.HasPrefix(strings.TrimSpace(t), "- [x]") || strings.HasPrefix(strings.TrimSpace(t), "☑") {
+					tasks[i] = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Render("☑ "+strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(t), "- [x]")), "☑")))
+				}
+			}
+		}
+		c := cat.color
+		if c == "" {
+			c = "229"
+		}
+		title := lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Bold(true).Align(lipgloss.Center).Width(28).Render(truncateString(cat.name, 28))
+		body := lipgloss.JoinVertical(lipgloss.Left, tasks...)
+		box := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(c)).
+			Background(lipgloss.Color("229")).
+			Foreground(lipgloss.Color("236")).
+			Padding(0, 1).
+			Width(30).
+			Render(lipgloss.JoinVertical(lipgloss.Top, title, body))
+		stickies = append(stickies, box)
+	}
+	// join stickies horizontally, wrap if needed
+	if len(stickies) == 0 {
+		return ""
+	}
+	// simple horizontal join, let lipgloss handle wrapping via width
+	row := lipgloss.JoinHorizontal(lipgloss.Top, stickies...)
+	// if too wide, just vertical stack
+	if lipgloss.Width(row) > width-4 {
+		row = lipgloss.JoinVertical(lipgloss.Top, stickies...)
+	}
+	header := lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Bold(true).Render(fmt.Sprintf("📌 Sticky Notes — %d categories (Ctrl+T in notes to make task)", len(stickies)))
+	return lipgloss.JoinVertical(lipgloss.Top, header, row)
+}
+
 func (m model) View() string {
 	if m.clockActive {
 		return m.clock.View()
@@ -5029,6 +5139,12 @@ func (m model) View() string {
 			return lipgloss.JoinVertical(lipgloss.Top, mainView, sep, noteView)
 		}
 		return lipgloss.JoinVertical(lipgloss.Top, mainView, sep, noteView, footer)
+	}
+	// sticky notes on main page — each category = 1 sticky note box with tasks (Ctrl+T)
+	if !m.noteOpen && len(m.noteCategories) > 0 {
+		if sticky := renderStickyNotes(m, m.width); sticky != "" {
+			mainView = lipgloss.JoinVertical(lipgloss.Top, mainView, "", sticky)
+		}
 	}
 	if m.footerHidden {
 		return mainView
