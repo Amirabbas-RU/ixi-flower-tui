@@ -1637,19 +1637,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		listWidth := m.width - 4
 		if !m.menuHidden {
-
-			minMenu := 18
-			maxMenu := max(minMenu, m.width-30)
-			if m.menuWidth < minMenu {
-				m.menuWidth = minMenu
+			// responsive sidebar — good on small windows, fixes tor/xray bad style
+			if m.width < 50 {
+				m.menuWidth = 14
+			} else if m.width < 70 {
+				m.menuWidth = 20
+			} else if m.width < 90 {
+				m.menuWidth = 26
+			} else {
+				minMenu := 18
+				maxMenu := max(minMenu, m.width-30)
+				if m.menuWidth < minMenu {
+					m.menuWidth = minMenu
+				}
+				if m.menuWidth > maxMenu {
+					m.menuWidth = maxMenu
+				}
 			}
-			if m.menuWidth > maxMenu {
-				m.menuWidth = maxMenu
-			}
-
 			listWidth = m.width - m.menuWidth - 1 - 4
 			if listWidth < 10 {
 				listWidth = 10
+				if m.width < 50 {
+					// auto-hide sidebar on very small screens to keep content readable
+					m.menuHidden = true
+					listWidth = m.width - 4
+				}
 			}
 		}
 
@@ -4015,6 +4027,55 @@ func truncateString(s string, length int) string {
 	return s[:length-3] + "..."
 }
 
+func noteShortcutsTable(width int) string {
+	// nice liney table for note categories shortcuts — at bottom of window
+	if width < 30 {
+		width = 30
+	}
+	tableWidth := width - 4
+	if tableWidth > 60 {
+		tableWidth = 60
+	}
+	col1 := 14
+	col2 := tableWidth - col1 - 3 // 3 for borders and separator
+	if col2 < 20 {
+		col2 = 20
+	}
+	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true).Align(lipgloss.Center)
+	cellKeyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Bold(true).PaddingLeft(1)
+	cellValStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).PaddingLeft(1)
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	top := borderStyle.Render("┌" + strings.Repeat("─", col1) + "┬" + strings.Repeat("─", col2) + "┐")
+	mid := borderStyle.Render("├" + strings.Repeat("─", col1) + "┼" + strings.Repeat("─", col2) + "┤")
+	bot := borderStyle.Render("└" + strings.Repeat("─", col1) + "┴" + strings.Repeat("─", col2) + "┘")
+	header := borderStyle.Render("│") + headerStyle.Width(col1).Render("Shortcut") + borderStyle.Render("│") + headerStyle.Width(col2).Render("Action") + borderStyle.Render("│")
+
+	rows := [][]string{
+		{"Ctrl+G", "Create new category"},
+		{"Ctrl+S", "Save note"},
+		{"Ctrl+L", "List categories"},
+		{"Enter", "Select category"},
+		{"e / Enter", "Edit / Rename"},
+		{"c", "Change color"},
+		{"d", "Delete category"},
+		{"↑ / ↓", "Navigate"},
+		{"Esc", "Close / Back"},
+	}
+	var b strings.Builder
+	b.WriteString(top + "\n")
+	b.WriteString(header + "\n")
+	b.WriteString(mid + "\n")
+	for _, r := range rows {
+		key := cellKeyStyle.Width(col1).Render(truncateString(r[0], col1-2))
+		val := cellValStyle.Width(col2).Render(truncateString(r[1], col2-2))
+		b.WriteString(borderStyle.Render("│") + key + borderStyle.Render("│") + val + borderStyle.Render("│") + "\n")
+	}
+	b.WriteString(bot)
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true).Align(lipgloss.Center).Width(tableWidth).Render("─ Note Shortcuts ─")
+	return lipgloss.JoinVertical(lipgloss.Top, title, b.String())
+}
+
 func (m model) View() string {
 	if m.clockActive {
 		return m.clock.View()
@@ -4098,50 +4159,81 @@ func (m model) View() string {
 		separator := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(strings.Repeat("─", 20))
 		menuView += separator + "\n"
 		menuView += "\n" + menuTitleStyle.Render("XRAY STATUS") + "\n"
+		// responsive: truncate long server names on small screens
+		xrayMax := max(10, m.menuWidth-4)
 		if m.xrayStatus == "running" {
 			statusText := "Running"
 			if m.xrayLastServer != "" {
-				statusText += " (" + m.xrayLastServer + ")"
+				statusText += " (" + truncateString(m.xrayLastServer, xrayMax-10) + ")"
 			}
 			menuView += lipgloss.NewStyle().
 				Foreground(lipgloss.Color("46")).
 				PaddingLeft(1).
-				Render("● "+statusText) + "\n"
-			// show ports with another color (butiful)
-			portText := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).PaddingLeft(1).Render("↳ HTTP:10808  SOCKS:10809  (xray)")
+				Render(truncateString("● "+statusText, xrayMax)) + "\n"
+			// responsive ports — short on small sidebar
+			var xPort string
+			if m.menuWidth < 22 {
+				xPort = "↳ :10808/:10809"
+			} else if m.menuWidth < 26 {
+				xPort = "↳ 10808/10809"
+			} else {
+				xPort = "↳ HTTP:10808  SOCKS:10809"
+			}
+			portText := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).PaddingLeft(1).Render(truncateString(xPort+"  (xray)", xrayMax))
 			menuView += portText + "\n"
 		} else {
 			menuView += lipgloss.NewStyle().
 				Foreground(lipgloss.Color("9")).
 				PaddingLeft(1).
 				Render("○ Stopped") + "\n"
-			portText := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingLeft(1).Render("↳ HTTP:10808  SOCKS:10809")
+			var xPort string
+			if m.menuWidth < 22 {
+				xPort = "↳ :10808/:10809"
+			} else {
+				xPort = "↳ HTTP:10808  SOCKS:10809"
+			}
+			portText := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingLeft(1).Render(truncateString(xPort, xrayMax))
 			menuView += portText + "\n"
 		}
-		menuView += menuItemStyle.Render("[X] Open Xray Menu") + "\n"
+		menuView += menuItemStyle.Render("[X] Open Xray") + "\n"
 		menuView += "\n" + menuTitleStyle.Render("TOR STATUS") + "\n"
+		torMax := max(10, m.menuWidth-4)
 		if m.torStatus == "running" {
 			torText := "Running"
-			if m.torIP != "" {
-				torText += " (" + m.torIP + ")"
+			if m.torIP != "" && m.menuWidth >= 22 {
+				torText += " (" + truncateString(m.torIP, torMax-10) + ")"
 			}
 			menuView += lipgloss.NewStyle().
 				Foreground(lipgloss.Color("51")).
 				PaddingLeft(1).
-				Render("● "+torText) + "\n"
-			portText := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).PaddingLeft(1).Render("↳ SOCKS:9050  ● Tor IP Changer")
+				Render(truncateString("● "+torText, torMax)) + "\n"
+			var tPort string
+			if m.menuWidth < 22 {
+				tPort = "↳ :9050"
+			} else {
+				tPort = "↳ SOCKS:9050"
+			}
+			portText := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).PaddingLeft(1).Render(truncateString(tPort, torMax))
 			menuView += portText + "\n"
-			ipDetail := lipgloss.NewStyle().Foreground(lipgloss.Color("229")).PaddingLeft(1).Render("  IP: "+m.torIP+"  (via Tor)")
-			menuView += ipDetail + "\n"
+			if m.menuWidth >= 20 && m.torIP != "" {
+				ipDetail := lipgloss.NewStyle().Foreground(lipgloss.Color("229")).PaddingLeft(1).Render(truncateString("IP: "+m.torIP, torMax))
+				menuView += ipDetail + "\n"
+			}
 		} else {
 			menuView += lipgloss.NewStyle().
 				Foreground(lipgloss.Color("9")).
 				PaddingLeft(1).
 				Render("○ Stopped") + "\n"
-			portText := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingLeft(1).Render("↳ SOCKS:9050  (tor)")
+			var tPort string
+			if m.menuWidth < 22 {
+				tPort = "↳ :9050"
+			} else {
+				tPort = "↳ SOCKS:9050"
+			}
+			portText := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingLeft(1).Render(truncateString(tPort, torMax))
 			menuView += portText + "\n"
 		}
-		menuView += menuItemStyle.Render("[Y] Open Tor IP Changer") + "\n"
+		menuView += menuItemStyle.Render("[Y] Tor") + "\n"
 	}
 
 	if m.addMode {
@@ -4647,6 +4739,12 @@ func (m model) View() string {
 					Render("Press Ctrl+G to create your first note category")
 			}
 			noteView = categoryInfo + "\n" + m.noteInput.View()
+		}
+
+		// nice liney shortcuts table at bottom of window when in note categories section
+		if m.noteCategoryListOpen || m.noteCategoryMenuOpen || m.noteCategoryAddMode || m.noteCategoryEditMode {
+			shortcutsTable := noteShortcutsTable(m.width)
+			noteView = lipgloss.JoinVertical(lipgloss.Top, noteView, "", shortcutsTable)
 		}
 
 		if m.noteFullscreen {
