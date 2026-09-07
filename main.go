@@ -4028,51 +4028,52 @@ func truncateString(s string, length int) string {
 }
 
 func noteShortcutsTable(width int) string {
-	// nice liney table for note categories shortcuts — at bottom of window
+	// vertical liney table — only for fullscreen, as requested
 	if width < 30 {
 		width = 30
 	}
 	tableWidth := width - 4
-	if tableWidth > 60 {
-		tableWidth = 60
+	if tableWidth > 40 {
+		tableWidth = 40
 	}
-	col1 := 14
-	col2 := tableWidth - col1 - 3 // 3 for borders and separator
-	if col2 < 20 {
-		col2 = 20
+	if tableWidth < 24 {
+		tableWidth = 24
 	}
-	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true).Align(lipgloss.Center)
-	cellKeyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Bold(true).PaddingLeft(1)
-	cellValStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).PaddingLeft(1)
+	inner := tableWidth - 2
 	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true).Align(lipgloss.Center)
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Bold(true).Align(lipgloss.Center)
+	valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Align(lipgloss.Center)
 
-	top := borderStyle.Render("┌" + strings.Repeat("─", col1) + "┬" + strings.Repeat("─", col2) + "┐")
-	mid := borderStyle.Render("├" + strings.Repeat("─", col1) + "┼" + strings.Repeat("─", col2) + "┤")
-	bot := borderStyle.Render("└" + strings.Repeat("─", col1) + "┴" + strings.Repeat("─", col2) + "┘")
-	header := borderStyle.Render("│") + headerStyle.Width(col1).Render("Shortcut") + borderStyle.Render("│") + headerStyle.Width(col2).Render("Action") + borderStyle.Render("│")
+	top := borderStyle.Render("┌" + strings.Repeat("─", inner) + "┐")
+	mid := borderStyle.Render("├" + strings.Repeat("─", inner) + "┤")
+	bot := borderStyle.Render("└" + strings.Repeat("─", inner) + "┘")
+	sep := borderStyle.Render("│" + strings.Repeat("─", inner) + "│")
 
 	rows := [][]string{
 		{"Ctrl+G", "Create new category"},
 		{"Ctrl+S", "Save note"},
 		{"Ctrl+L", "List categories"},
 		{"Enter", "Select category"},
-		{"e / Enter", "Edit / Rename"},
+		{"e", "Edit / Rename"},
 		{"c", "Change color"},
 		{"d", "Delete category"},
-		{"↑ / ↓", "Navigate"},
+		{"↑↓", "Navigate"},
 		{"Esc", "Close / Back"},
 	}
 	var b strings.Builder
 	b.WriteString(top + "\n")
-	b.WriteString(header + "\n")
+	b.WriteString(borderStyle.Render("│") + headerStyle.Width(inner).Render("Shortcuts") + borderStyle.Render("│") + "\n")
 	b.WriteString(mid + "\n")
-	for _, r := range rows {
-		key := cellKeyStyle.Width(col1).Render(truncateString(r[0], col1-2))
-		val := cellValStyle.Width(col2).Render(truncateString(r[1], col2-2))
-		b.WriteString(borderStyle.Render("│") + key + borderStyle.Render("│") + val + borderStyle.Render("│") + "\n")
+	for i, r := range rows {
+		b.WriteString(borderStyle.Render("│") + keyStyle.Width(inner).Render(truncateString(r[0], inner)) + borderStyle.Render("│") + "\n")
+		b.WriteString(borderStyle.Render("│") + valStyle.Width(inner).Render(truncateString(r[1], inner)) + borderStyle.Render("│") + "\n")
+		if i < len(rows)-1 {
+			b.WriteString(sep + "\n")
+		}
 	}
 	b.WriteString(bot)
-	title := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true).Align(lipgloss.Center).Width(tableWidth).Render("─ Note Shortcuts ─")
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true).Align(lipgloss.Center).Width(tableWidth).Render("─ Note Shortcuts (fullscreen) ─")
 	return lipgloss.JoinVertical(lipgloss.Top, title, b.String())
 }
 
@@ -4741,8 +4742,8 @@ func (m model) View() string {
 			noteView = categoryInfo + "\n" + m.noteInput.View()
 		}
 
-		// nice liney shortcuts table at bottom of window when in note categories section
-		if m.noteCategoryListOpen || m.noteCategoryMenuOpen || m.noteCategoryAddMode || m.noteCategoryEditMode {
+		// show keybinds only in fullscreen, vertical table at bottom
+		if m.noteFullscreen && (m.noteCategoryListOpen || m.noteCategoryMenuOpen || m.noteCategoryAddMode || m.noteCategoryEditMode) {
 			shortcutsTable := noteShortcutsTable(m.width)
 			noteView = lipgloss.JoinVertical(lipgloss.Top, noteView, "", shortcutsTable)
 		}
