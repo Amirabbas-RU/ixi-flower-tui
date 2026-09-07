@@ -243,6 +243,7 @@ func (p project) FilterValue() string { return p.name }
 
 type model struct {
 	list             list.Model
+	scriptActive     bool
 	width            int
 	height           int
 	lastAction       string
@@ -979,9 +980,10 @@ func initialModel() model {
 
 	return model{
 		list:                   l,
+		scriptActive:           false,
 		bookmarkList:           bl,
 		projectsList:           pl,
-		projectsActive:         len(items) == 0,
+		projectsActive:         false,
 		dockerList:             dl,
 		dockerImageList:        dil,
 		noteCategoryList:       ncl,
@@ -3663,6 +3665,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "esc":
+			if m.scriptActive {
+				m.scriptActive = false
+				m.lastAction = "Scripts closed"
+				return m, nil
+			}
+			// let other esc handlers below handle it
+
 		case "q", "ctrl+c":
 
 			if m.noteInput.Value() != m.noteLastSaved {
@@ -3673,6 +3683,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "d", "D":
 			m.dockerServicesActive = !m.dockerServicesActive
 			m.dockerImagesActive = false
+			m.scriptActive = false
 			if m.dockerServicesActive {
 				m.bookmarksActive = false
 				m.projectsActive = false
@@ -3685,6 +3696,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "I":
 			m.dockerImagesActive = !m.dockerImagesActive
 			m.dockerServicesActive = false
+			m.scriptActive = false
 			if m.dockerImagesActive {
 				m.bookmarksActive = false
 				m.projectsActive = false
@@ -3705,6 +3717,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "n":
+			m.scriptActive = false
 			m.noteOpen = !m.noteOpen
 			if m.noteOpen {
 				m.noteFullscreen = false
@@ -3734,6 +3747,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, openKittyTerminalCmd()
 
 		case "h", "H":
+			m.scriptActive = false
 			m.htopActive = !m.htopActive
 			if m.htopActive {
 				m.lastAction = "htop activated"
@@ -3925,6 +3939,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "c", "C":
 			// Handle clock activation
+			m.scriptActive = false
 			m.clockActive = !m.clockActive
 			if m.clockActive {
 				m.noteOpen = false
@@ -3945,6 +3960,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "X":
+			m.scriptActive = false
 			xrayProjectPath := "/etc/ixi-tui-main/xray"
 			if _, err := os.Stat(xrayProjectPath); os.IsNotExist(err) {
 				m.lastAction = "Xray project not found at: " + xrayProjectPath
@@ -3966,6 +3982,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 
 		case "Y", "y":
+			m.scriptActive = false
 			torProjectPath := "/etc/ixi-tui-main/tor"
 			if _, err := os.Stat(torProjectPath); os.IsNotExist(err) {
 				m.lastAction = "Tor project not found at: " + torProjectPath
@@ -4013,15 +4030,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			// Open projects section when not in edit mode
+			m.scriptActive = false
 			m.projectsActive = true
 			m.lastAction = "Opened Projects"
 			return m, nil
 
 		case "s", "S":
-			// Only allow search when not already in search mode for a specific section
-			if !m.searchFocused {
-				m.searchFocused = true
-				m.searchInput.Focus()
+			// in panels, s = search; otherwise s = Scripts like other TUI options
+			if m.projectsActive || m.dockerServicesActive || m.dockerImagesActive || m.dockerHubActive || m.bookmarksActive || m.noteOpen || m.htopActive || m.clockActive || m.scriptActive {
+				if !m.searchFocused {
+					m.searchFocused = true
+					m.searchInput.Focus()
+				}
+				return m, nil
+			}
+			m.scriptActive = !m.scriptActive
+			if m.scriptActive {
+				m.lastAction = "Scripts opened (s to close, a to add)"
+			} else {
+				m.lastAction = "Scripts closed"
 			}
 			return m, nil
 
@@ -4330,11 +4357,15 @@ func (m model) View() string {
 		}
 	} else {
 		menuOptions := []string{
-			"1 - Add Scripts",
-			"2 - Remove Scripts",
-			"3 - Edit Scripts",
-			"4 - Projects",
+			"p - Projects",
+			"d - Docker",
+			"I - Images  (hub: h)",
+			"n - Notes  (sticky)",
+			"X - Xray  :10808/:10809",
+			"Y - Tor   :9050",
 			"c - Clock",
+			"H - Htop",
+			"s - Scripts",
 		}
 
 		menuView += menuTitleStyle.Render("MENU") + "\n"
@@ -4482,6 +4513,15 @@ func (m model) View() string {
 		menuView += menuItemStyle.Render("s - Search") + "\n"
 		menuView += menuItemStyle.Render("x - Auto-discover") + "\n"
 		menuView += menuItemStyle.Render("esc - Back") + "\n"
+	} else if m.scriptActive {
+		menuView += "\n" + menuTitleStyle.Render("SCRIPTS") + "\n"
+		menuView += menuItemStyle.Render("a - Add script") + "\n"
+		menuView += menuItemStyle.Render("d - Delete") + "\n"
+		menuView += menuItemStyle.Render("e - Edit") + "\n"
+		menuView += menuItemStyle.Render("s - Search") + "\n"
+		menuView += menuItemStyle.Render("enter - Run") + "\n"
+		menuView += menuItemStyle.Render("o - Run in new terminal") + "\n"
+		menuView += menuItemStyle.Render("esc - Back") + "\n"
 	} else if m.editMode {
 		menuView += "\n" + menuTitleStyle.Render("EDIT SCRIPT") + "\n"
 
@@ -4621,30 +4661,39 @@ func (m model) View() string {
 
 		listView = lipgloss.JoinVertical(lipgloss.Top, titleView, searchView, activeList.View())
 		paneHeight = lipgloss.Height(listView)
-	} else if len(m.list.Items()) == 0 {
-		// hide scripts session when no scripts — show minimal hint with another color (46 green)
+	} else if m.scriptActive {
 		activeList = m.list
-		hint := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Align(lipgloss.Center).Render("No scripts yet")
-		hint2 := lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true).Align(lipgloss.Center).Render("Press 'a' to add  ·  'p' for projects  ·  'd' for docker  ·  'Y' for tor")
-		// center hints, don't show empty list session
-		listView = lipgloss.JoinVertical(lipgloss.Top, hint, "", hint2)
+		activeTitle = "Scripts"
+		if len(m.list.Items()) == 0 {
+			hint := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Align(lipgloss.Center).Render("No scripts yet")
+			hint2 := lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true).Align(lipgloss.Center).Render("Press 'a' to add  ·  'p' for projects  ·  'd' for docker")
+			listView = lipgloss.JoinVertical(lipgloss.Top, hint, "", hint2)
+			if m.menuHidden {
+				listWidth := max(20, m.width-4)
+				listView = lipgloss.NewStyle().Width(listWidth).Align(lipgloss.Center).Render(listView)
+			}
+			paneHeight = lipgloss.Height(listView)
+		} else {
+			titleView := activeList.Styles.Title.Render(activeTitle)
+			searchView := m.searchInput.View()
+			if m.menuHidden {
+				listWidth := activeList.Width()
+				titleView = lipgloss.NewStyle().Width(listWidth).Align(lipgloss.Center).Render(activeTitle)
+				searchView = lipgloss.NewStyle().Width(listWidth).Align(lipgloss.Center).Render(m.searchInput.View())
+			}
+			listView = lipgloss.JoinVertical(lipgloss.Top, titleView, searchView, activeList.View())
+			paneHeight = lipgloss.Height(listView)
+		}
+	} else {
+		// dashboard — scripts not shown as main, like other TUI options
+		dashTitle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true).Align(lipgloss.Center).Render("IXI Dashboard")
+		dashMsg := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Align(lipgloss.Center).Render("p:Projects  d:Docker  n:Notes  s:Scripts  H:Htop  X:Xray  Y:Tor")
+		dashHint := lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Align(lipgloss.Center).Render("Select from MENU →")
+		listView = lipgloss.JoinVertical(lipgloss.Top, dashTitle, "", dashMsg, dashHint)
 		if m.menuHidden {
 			listWidth := max(20, m.width-4)
 			listView = lipgloss.NewStyle().Width(listWidth).Align(lipgloss.Center).Render(listView)
 		}
-		paneHeight = lipgloss.Height(listView)
-	} else {
-		titleView := activeList.Styles.Title.Render(activeTitle)
-		searchView := m.searchInput.View()
-
-		// Center the title and search when menu is hidden
-		if m.menuHidden {
-			listWidth := activeList.Width()
-			titleView = lipgloss.NewStyle().Width(listWidth).Align(lipgloss.Center).Render(activeTitle)
-			searchView = lipgloss.NewStyle().Width(listWidth).Align(lipgloss.Center).Render(m.searchInput.View())
-		}
-
-		listView = lipgloss.JoinVertical(lipgloss.Top, titleView, searchView, activeList.View())
 		paneHeight = lipgloss.Height(listView)
 	}
 
