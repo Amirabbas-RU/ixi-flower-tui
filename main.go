@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"bufio"
+	"bytes"
+	"regexp"
 	"sync"
 
 	"os"
@@ -645,7 +647,22 @@ func searchDockerHub(query string) ([]list.Item, error) {
 var (
 	pullProgressMu   sync.Mutex
 	pullProgressLine string
+	ansiRe           = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 )
+
+// split on both \r and \n — docker pull writes progress with \r
+func scanCRLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+		return i + 1, data[:i], nil
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
 
 func dockerHubPullCmd(image string) tea.Cmd {
 	var runPull tea.Cmd = func() tea.Msg {
@@ -656,21 +673,21 @@ func dockerHubPullCmd(image string) tea.Cmd {
 		go func() {
 			scanner := bufio.NewScanner(pr)
 			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			scanner.Split(scanCRLF)
+			var recent []string
 			for scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
+				line = ansiRe.ReplaceAllString(line, "")
 				if line == "" {
 					continue
 				}
-				// docker emits \r progress lines; keep only meaningful ones
-				if strings.Contains(line, "Pulling") || strings.Contains(line, "Download") ||
-					strings.Contains(line, "Extracting") || strings.Contains(line, "Waiting") ||
-					strings.Contains(line, "Verifying") || strings.Contains(line, "Complete") ||
-					strings.Contains(line, "Pull complete") || strings.Contains(line, "Digest") ||
-					strings.Contains(line, "Status") || strings.Contains(line, "Already exists") {
-					pullProgressMu.Lock()
-					pullProgressLine = line
-					pullProgressMu.Unlock()
+				recent = append(recent, line)
+				if len(recent) > 3 {
+					recent = recent[1:]
 				}
+				pullProgressMu.Lock()
+				pullProgressLine = strings.Join(recent, "  |  ")
+				pullProgressMu.Unlock()
 			}
 		}()
 		err := cmd.Run()
@@ -5419,8 +5436,12 @@ func (m model) View() string {
 			if m.dockerPulling {
 				sp := spinners[m.dockerPullSpinner%len(spinners)]
 				statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
-				statusLine := statusStyle.Render(fmt.Sprintf("%s Pulling %s — %s", sp, m.dockerPullImage, truncateString(m.dockerPullStatus, 60)))
-				// right side of the bottom box, as requested
+				// full status, no truncation — compact form: image + raw docker line
+				compact := m.dockerPullStatus
+				if len(compact) > 140 {
+					compact = compact[:140]
+				}
+				statusLine := statusStyle.Render(fmt.Sprintf("%s Pulling %s — %s", sp, m.dockerPullImage, compact))
 				statusRight := lipgloss.PlaceHorizontal(m.width-8, lipgloss.Right, statusLine)
 				lines = append(lines, statusRight)
 			} else if m.dockerHubActive && m.dockerHubSearching {
