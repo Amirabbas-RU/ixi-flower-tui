@@ -2789,24 +2789,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.dockerHubActive {
-			switch msg.String() {
-			case "esc":
-				if m.dockerHubInput.Focused() {
+			// when input is focused, only esc/enter/tab should be shortcuts — letters like s/p/r/d must be typed
+			if m.dockerHubInput.Focused() {
+				switch msg.String() {
+				case "esc":
 					m.dockerHubInput.Blur()
-					// second esc closes hub
 					if m.dockerHubList.Items() != nil && len(m.dockerHubList.Items()) > 0 {
-						// keep hub open but unfocused, next esc will close
-						// allow list navigation after input blur
 						return m, nil
 					}
-				}
-				m.dockerHubActive = false
-				m.dockerHubInput.Blur()
-				m.dockerHubSearching = false
-				m.lastAction = "Closed Docker Hub search"
-				return m, nil
-			case "enter", "p", "P", "d", "D":
-				if m.dockerHubInput.Focused() {
+					m.dockerHubActive = false
+					m.dockerHubSearching = false
+					m.lastAction = "Closed Docker Hub search"
+					return m, nil
+				case "enter":
 					q := strings.TrimSpace(m.dockerHubInput.Value())
 					if q == "" {
 						m.lastAction = "Enter a search term for Docker Hub"
@@ -2817,57 +2812,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.dockerHubInput.Blur()
 					m.lastAction = "Searching Hub for " + q + "..."
 					return m, searchDockerHubCmd(q)
-				}
-				if m.dockerHubSearching {
+				case "tab", "/":
+					m.dockerHubInput.Blur()
 					return m, nil
 				}
-				if it, ok := m.dockerHubList.SelectedItem().(dockerHubImage); ok {
-					m.lastAction = "Pulling " + it.title + "..."
-					return m, dockerHubPullCmd(it.title)
-				}
-				return m, nil
-			case "r", "R":
-				if m.dockerHubInput.Focused() {
-					// treat r as search if input focused
-					q := strings.TrimSpace(m.dockerHubInput.Value())
-					if q != "" {
-						m.hubSearchSeq++
-						m.dockerHubSearching = true
-						m.dockerHubInput.Blur()
-						m.lastAction = "Searching Hub for " + q + "..."
-						return m, searchDockerHubCmd(q)
-					}
-					return m, nil
-				}
-				if it, ok := m.dockerHubList.SelectedItem().(dockerHubImage); ok {
-					// open run dialog for hub image (pull will happen on docker run if needed)
+				// any other key when focused goes to input (so s/p/r/d can be typed)
+			} else {
+				switch msg.String() {
+				case "esc":
 					m.dockerHubActive = false
 					m.dockerHubInput.Blur()
-					m.imageRunDialogOpen = true
-					m.imageRunImageRef = it.title
-					m.imageRunInputs[0].SetValue("")
-					m.imageRunInputs[1].SetValue("")
-					m.imageRunInputs[2].SetValue("")
-					m.imageRunInputs[3].SetValue("")
-					m.imageRunFocus = 0
-					m.imageRunInputs[0].Focus()
-					m.imageRunInputs[1].Blur()
-					m.imageRunInputs[2].Blur()
-					m.imageRunInputs[3].Blur()
-					m.lastAction = "Run " + it.title + " (config ports/volumes, enter to run)"
+					m.dockerHubSearching = false
+					m.lastAction = "Closed Docker Hub search"
+					return m, nil
+				case "enter", "p", "P", "d", "D":
+					if m.dockerHubSearching {
+						return m, nil
+					}
+					if it, ok := m.dockerHubList.SelectedItem().(dockerHubImage); ok {
+						m.lastAction = "Pulling " + it.title + "..."
+						return m, dockerHubPullCmd(it.title)
+					}
+					return m, nil
+				case "r", "R":
+					if it, ok := m.dockerHubList.SelectedItem().(dockerHubImage); ok {
+						m.dockerHubActive = false
+						m.dockerHubInput.Blur()
+						m.imageRunDialogOpen = true
+						m.imageRunImageRef = it.title
+						m.imageRunInputs[0].SetValue("")
+						m.imageRunInputs[1].SetValue("")
+						m.imageRunInputs[2].SetValue("")
+						m.imageRunInputs[3].SetValue("")
+						m.imageRunFocus = 0
+						m.imageRunInputs[0].Focus()
+						m.imageRunInputs[1].Blur()
+						m.imageRunInputs[2].Blur()
+						m.imageRunInputs[3].Blur()
+						m.lastAction = "Run " + it.title + " (config ports/volumes, enter to run)"
+						return m, nil
+					}
+					return m, nil
+				case "tab", "/":
+					m.dockerHubInput.Focus()
 					return m, nil
 				}
-				return m, nil
-			case "tab", "/":
-				if m.dockerHubInput.Focused() {
-					m.dockerHubInput.Blur()
-				} else {
-					m.dockerHubInput.Focus()
-				}
-				return m, nil
-			case "s", "S":
-				m.dockerHubInput.Focus()
-				return m, nil
 			}
 			// update hub input if focused, otherwise update list
 			if m.dockerHubInput.Focused() {
