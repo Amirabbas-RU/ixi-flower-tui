@@ -4690,6 +4690,14 @@ func (m model) View() string {
 		dashMsg := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Align(lipgloss.Center).Render("p:Projects  d:Docker  n:Notes  s:Scripts  H:Htop  X:Xray  Y:Tor")
 		dashHint := lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Align(lipgloss.Center).Render("Select from MENU →")
 		listView = lipgloss.JoinVertical(lipgloss.Top, dashTitle, "", dashMsg, dashHint)
+		// sticky notes at bottom of right side (not under sidebar)
+		if len(m.noteCategories) > 0 {
+			if sticky := renderStickyNotes(m, rightWidth); sticky != "" {
+				// place sticky at bottom of right pane, with separator
+				sepLine := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(strings.Repeat("─", max(10, rightWidth-2)))
+				listView = lipgloss.JoinVertical(lipgloss.Top, listView, "", sepLine, sticky)
+			}
+		}
 		if m.menuHidden {
 			listWidth := max(20, m.width-4)
 			listView = lipgloss.NewStyle().Width(listWidth).Align(lipgloss.Center).Render(listView)
@@ -5188,12 +5196,6 @@ func (m model) View() string {
 			return lipgloss.JoinVertical(lipgloss.Top, mainView, sep, noteView)
 		}
 		return lipgloss.JoinVertical(lipgloss.Top, mainView, sep, noteView, footer)
-	}
-	// sticky notes on main page — each category = 1 sticky note box with tasks (Ctrl+T)
-	if !m.noteOpen && len(m.noteCategories) > 0 {
-		if sticky := renderStickyNotes(m, m.width); sticky != "" {
-			mainView = lipgloss.JoinVertical(lipgloss.Top, mainView, "", sticky)
-		}
 	}
 	if m.footerHidden {
 		return mainView
