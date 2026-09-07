@@ -3201,7 +3201,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.dockerHubSearching = false
 					m.lastAction = "Closed Docker Hub search"
 					return m, nil
-				case "enter", "p", "P", "d", "D":
+				case "enter":
+					// select the result — p then pulls it
+					if it, ok := m.dockerHubList.SelectedItem().(dockerHubImage); ok {
+						m.lastAction = "Selected: " + it.title + " — press p to pull"
+						return m, nil
+					}
+					return m, nil
+				case "p", "P":
 					if m.dockerHubSearching {
 						return m, nil
 					}
@@ -5378,8 +5385,24 @@ func (m model) View() string {
 
 	var content string
 
+	// docker pull progress — global (shows even outside docker sections, small screens included)
+	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 	if m.menuHidden {
-		content = listPaneStyle.Width(rightWidth).Height(containerHeight).Render(rightPlaced)
+		rowContent := listPaneStyle.Width(rightWidth).Height(containerHeight).Render(rightPlaced)
+		if m.dockerPulling {
+			sp := spinners[m.dockerPullSpinner%len(spinners)]
+			statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
+			compact := m.dockerPullStatus
+			if len(compact) > 140 {
+				compact = compact[:140]
+			}
+			statusLine := statusStyle.Render(fmt.Sprintf("%s Pulling %s — %s", sp, m.dockerPullImage, compact))
+			statusRight := lipgloss.PlaceHorizontal(m.width-4, lipgloss.Right, statusLine)
+			content = lipgloss.JoinVertical(lipgloss.Bottom, rowContent, statusRight)
+		} else {
+			content = rowContent
+		}
 	} else {
 		leftPane := menuPaneStyle.
 			Width(m.menuWidth).
@@ -5392,9 +5415,6 @@ func (m model) View() string {
 
 		// separate option box UNDER the whole content row (bottom of window, full width)
 		rowContent := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, divider, listPaneStyle.Width(rightWidth).Height(containerHeight).Render(rightPlaced))
-
-		// docker pull progress spinner
-		spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 		if m.githubActive {
 			ghBoxStyle := lipgloss.NewStyle().
@@ -5423,7 +5443,7 @@ func (m model) View() string {
 			var keys string
 			if m.dockerHubActive {
 				title = lipgloss.NewStyle().Foreground(lipgloss.Color("45")).Bold(true).Render("🐳 Hub — ")
-				keys = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("type to search live  enter/p:Pull  r:Run  s:focus  tab:toggle  esc:Back")
+				keys = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("type to search live  ↑↓+enter:Select  p:Pull  r:Run  esc:Back")
 			} else if m.dockerImagesActive {
 				title = lipgloss.NewStyle().Foreground(lipgloss.Color("45")).Bold(true).Render("🐳 Images — ")
 				keys = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("enter/r:Run  e:Exec  x:Remove  i:Inspect  p:Prune  d:Services  h:Hub  esc:Back")
@@ -5449,6 +5469,17 @@ func (m model) View() string {
 			}
 			box := boxStyle.Render(lipgloss.JoinVertical(lipgloss.Top, lines...))
 			content = lipgloss.JoinVertical(lipgloss.Bottom, rowContent, box)
+		} else if m.dockerPulling {
+			// pulling but not in a docker section — keep status visible
+			sp := spinners[m.dockerPullSpinner%len(spinners)]
+			statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
+			compact := m.dockerPullStatus
+			if len(compact) > 140 {
+				compact = compact[:140]
+			}
+			statusLine := statusStyle.Render(fmt.Sprintf("%s Pulling %s — %s", sp, m.dockerPullImage, compact))
+			statusRight := lipgloss.PlaceHorizontal(m.width-4, lipgloss.Right, statusLine)
+			content = lipgloss.JoinVertical(lipgloss.Bottom, rowContent, statusRight)
 		} else {
 			content = rowContent
 		}
