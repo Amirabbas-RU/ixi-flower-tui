@@ -1312,7 +1312,7 @@ func initialModel() model {
 	runVolumesInput.Blur()
 
 	runExtraInput := textinput.New()
-	runExtraInput.Placeholder = "-e ENV=val --restart always (optional)"
+	runExtraInput.Placeholder = "e.g. bash | -e ENV=val --restart always (optional)"
 	runExtraInput.Prompt = "Extra: "
 	runExtraInput.CharLimit = 512
 	runExtraInput.Width = 40
@@ -2158,7 +2158,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastError = msg.err
 			m.lastAction = "Failed to run container: " + msg.err.Error()
 		} else {
-			m.lastAction = "Container started: " + msg.containerID
+			state := dockerContainerState(msg.containerID)
+			if state == "exited" {
+				m.lastAction = "⚠ Container " + msg.containerID[:12] + " exited immediately — shell images need a command; add e.g. `bash` in Extra Args, or use -it"
+			} else {
+				m.lastAction = "✅ Container running: " + msg.containerID[:12] + " (state: " + state + ")"
+			}
 			m.imageRunContainerID = msg.containerID
 		}
 		if m.dockerImagesActive {
@@ -3281,6 +3286,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "tab", "/":
 					m.dockerHubInput.Blur()
 					return m, nil
+				case "up", "down":
+					// arrows leave the input and navigate results — so enter/p/r work
+					m.dockerHubInput.Blur()
+					m.dockerHubList, cmd = m.dockerHubList.Update(msg)
+					return m, cmd
 				}
 				// any other key when focused goes to input (so s/p/r/d can be typed)
 			} else {
@@ -6218,6 +6228,9 @@ func runDockerImageWithOptions(name, ports, volumes, extra, image string) (strin
 	}
 	if extra != "" {
 		args = append(args, strings.Fields(extra)...)
+	} else {
+		// shell images (ubuntu/debian) exit instantly with plain -d — keep them alive
+		args = append(args, "-it")
 	}
 	args = append(args, image)
 	cmd := exec.Command("docker", args...)
@@ -6226,6 +6239,15 @@ func runDockerImageWithOptions(name, ports, volumes, extra, image string) (strin
 		return "", fmt.Errorf("docker run failed: %s", strings.TrimSpace(string(output)))
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// check container state after start so we can tell the user why it exited
+func dockerContainerState(cid string) string {
+	out, err := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", cid).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func findContainerFromImage(image string) (string, error) {
