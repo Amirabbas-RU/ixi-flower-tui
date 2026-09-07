@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"bufio"
+	"sync"
 
 	"os"
 	"os/exec"
@@ -343,6 +345,12 @@ type model struct {
 	torStatus string
 	torIP     string
 
+	// Docker Hub pull progress — shown in bottom box
+	dockerPulling     bool
+	dockerPullImage   string
+	dockerPullStatus  string
+	dockerPullSpinner int
+
 	// GitHub — clone via link, commit/push/pull for projects
 	githubActive      bool
 	githubInput       textinput.Model
@@ -485,6 +493,8 @@ type dockerHubPullMsg struct {
 	image string
 	err   error
 }
+
+type dockerPullTickMsg struct{}
 
 type torStatusMsg struct {
 	status string
@@ -632,15 +642,51 @@ func searchDockerHub(query string) ([]list.Item, error) {
 	return items, nil
 }
 
+var (
+	pullProgressMu   sync.Mutex
+	pullProgressLine string
+)
+
 func dockerHubPullCmd(image string) tea.Cmd {
-	return func() tea.Msg {
+	var runPull tea.Cmd = func() tea.Msg {
 		cmd := exec.Command("docker", "pull", image)
-		out, err := cmd.CombinedOutput()
+		pr, pw := io.Pipe()
+		cmd.Stdout = pw
+		cmd.Stderr = pw
+		go func() {
+			scanner := bufio.NewScanner(pr)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" {
+					continue
+				}
+				// docker emits \r progress lines; keep only meaningful ones
+				if strings.Contains(line, "Pulling") || strings.Contains(line, "Download") ||
+					strings.Contains(line, "Extracting") || strings.Contains(line, "Waiting") ||
+					strings.Contains(line, "Verifying") || strings.Contains(line, "Complete") ||
+					strings.Contains(line, "Pull complete") || strings.Contains(line, "Digest") ||
+					strings.Contains(line, "Status") || strings.Contains(line, "Already exists") {
+					pullProgressMu.Lock()
+					pullProgressLine = line
+					pullProgressMu.Unlock()
+				}
+			}
+		}()
+		err := cmd.Run()
+		pw.Close()
 		if err != nil {
-			return dockerHubPullMsg{image: image, err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))}
+			return dockerHubPullMsg{image: image, err: fmt.Errorf("%w", err)}
 		}
 		return dockerHubPullMsg{image: image, err: nil}
 	}
+	return tea.Batch(runPull, pullProgressTickCmd())
+}
+
+func pullProgressTickCmd() tea.Cmd {
+	return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
+		return dockerPullTickMsg{}
+	})
 }
 
 func getGithubRepos() ([]list.Item, error) {
@@ -2026,15 +2072,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dockerHubPullMsg:
+		m.dockerPulling = false
+		m.dockerPullStatus = ""
 		if msg.err != nil {
 			m.lastError = msg.err
 			m.lastAction = "Pull failed: " + msg.err.Error()
 		} else {
-			m.lastAction = "Pulled " + msg.image + " — press r to run or check Images (i)"
+			m.lastAction = "✅ Pulled " + msg.image + " — press r to run or check Images (i)"
 			m.lastError = nil
 		}
 		if m.dockerImagesActive {
 			return m, fetchDockerImagesCmd()
+		}
+		return m, nil
+
+	case dockerPullTickMsg:
+		if m.dockerPulling {
+			m.dockerPullSpinner++
+			pullProgressMu.Lock()
+			line := pullProgressLine
+			pullProgressMu.Unlock()
+			m.dockerPullStatus = line
+			return m, pullProgressTickCmd()
 		}
 		return m, nil
 
@@ -3130,7 +3189,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					if it, ok := m.dockerHubList.SelectedItem().(dockerHubImage); ok {
-						m.lastAction = "Pulling " + it.title + "..."
+						m.dockerPulling = true
+						m.dockerPullImage = it.title
+						m.dockerPullStatus = "starting docker pull..."
+						m.lastAction = "⬇ Pulling " + it.title + " (status in bottom box)"
 						return m, dockerHubPullCmd(it.title)
 					}
 					return m, nil
@@ -3957,6 +4019,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.githubInput.Blur()
 					m.githubCommitInput.Focus()
 					return m, nil
+				case "up", "down":
+					// arrows navigate the repo list even from input
+					m.githubInput.Blur()
+					m.githubList, cmd = m.githubList.Update(msg)
+					return m, cmd
 				}
 				var c tea.Cmd
 				m.githubInput, c = m.githubInput.Update(msg)
@@ -3978,12 +4045,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.githubCommitInput.SetValue("")
 						return m, githubActionCmd(sel.path, "commit", commitMsg)
 					}
-					m.lastAction = "Select a repo first"
+					m.lastAction = "Select a repo first (↑↓ to choose)"
 					return m, nil
 				case "tab":
 					m.githubCommitInput.Blur()
 					m.githubInput.Focus()
 					return m, nil
+				case "up", "down":
+					m.githubCommitInput.Blur()
+					m.githubList, cmd = m.githubList.Update(msg)
+					return m, cmd
 				}
 				var c tea.Cmd
 				m.githubCommitInput, c = m.githubCommitInput.Update(msg)
@@ -3996,15 +4067,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.githubCommitInput.Blur()
 				m.lastAction = "Closed GitHub"
 				return m, nil
-			case "a", "A", "/":
+			case "a", "A":
 				m.githubInput.Focus()
 				return m, nil
-			case "c", "C":
-				if _, ok := m.githubList.SelectedItem().(githubRepo); ok {
+			case "up", "k":
+				m.githubList.CursorUp()
+				return m, nil
+			case "down", "j":
+				m.githubList.CursorDown()
+				return m, nil
+			case "enter", "c", "C":
+				if sel, ok := m.githubList.SelectedItem().(githubRepo); ok {
+					m.lastAction = "Selected: " + sel.name + " (" + sel.branch + ") — type msg + enter to commit, u:push, p:pull"
 					m.githubCommitInput.Focus()
 					return m, nil
 				}
-				m.lastAction = "Select a repo to commit"
+				m.lastAction = "No repos — press a to clone one first"
 				return m, nil
 			case "p", "P":
 				if sel, ok := m.githubList.SelectedItem().(githubRepo); ok {
@@ -4023,9 +4101,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.lastAction = "Status " + sel.name + "..."
 					return m, githubActionCmd(sel.path, "status", "")
 				}
-				// otherwise filter
-				m.githubList.SetFilterText(m.githubInput.Value())
-				m.githubInput.Focus()
 				return m, nil
 			case "f", "F":
 				if sel, ok := m.githubList.SelectedItem().(githubRepo); ok {
@@ -4040,16 +4115,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "r", "R":
 				if repos, err := getGithubRepos(); err == nil {
 					m.githubList.SetItems(repos)
-					m.lastAction = fmt.Sprintf("GitHub: %d repos", len(repos))
+					if len(repos) > 0 {
+						m.githubList.Select(0)
+					}
+					m.lastAction = fmt.Sprintf("GitHub: %d repos (↑↓ to select, enter to focus commit)", len(repos))
 				}
 				return m, nil
-			}
-			// filter typing
-			if len(msg.String()) == 1 && strings.Contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/.:", msg.String()) {
-				m.githubInput.Focus()
-				var c tea.Cmd
-				m.githubInput, c = m.githubInput.Update(msg)
-				return m, c
 			}
 			m.githubList, cmd = m.githubList.Update(msg)
 			return m, cmd
@@ -4730,9 +4801,10 @@ func (m model) View() string {
 
 	var logo string
 	logoContent := logoStyle.Render(logoText)
+	// small screens: hide ASCII logo AND htop panel to save space
 	showLogo := m.width >= 80
 
-	if m.htopActive {
+	if m.htopActive && m.width >= 80 {
 		htopTitle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("252")).
 			Bold(true).
@@ -4763,6 +4835,9 @@ func (m model) View() string {
 		} else {
 			logo = topRightContent
 		}
+	} else if m.htopActive {
+		// htop requested but screen too small — show compact one-liner instead
+		logo = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true).Width(m.width).Align(lipgloss.Center).Render("HTOP (small screen — enlarge for monitor)")
 	} else {
 		if showLogo {
 			logo = logoStyle.Width(m.width).Render(logoText)
@@ -4908,40 +4983,25 @@ func (m model) View() string {
 			menuView += menuItemStyle.Render("Searching...") + "\n"
 		} else if len(m.dockerHubList.Items()) > 0 {
 			menuView += menuItemStyle.Render(fmt.Sprintf("%d results (★ pulls desc)", len(m.dockerHubList.Items()))) + "\n"
-			menuView += menuItemStyle.Render("enter/p/d - pull (download)") + "\n"
-			menuView += menuItemStyle.Render("r - run (config dialog)") + "\n"
 		} else if strings.TrimSpace(m.dockerHubInput.Value()) != "" {
 			menuView += menuItemStyle.Render("keep typing... (live 600ms)") + "\n"
 		}
-		menuView += menuItemStyle.Render("s - focus search") + "\n"
-		menuView += menuItemStyle.Render("tab - toggle input/list") + "\n"
-		menuView += menuItemStyle.Render("esc - Back") + "\n"
 	} else if m.githubActive {
 		menuView += "\n" + menuTitleStyle.Render("GITHUB") + "\n"
 		menuView += menuItemStyle.Render("● GitHub Hub") + "\n"
-		menuView += menuItemStyle.Render("a:Clone  c:Commit") + "\n"
-		// detailed options moved to bottom box in front of sidebar (see leftPane bottom)
+		menuView += menuItemStyle.Render("options in box ↓") + "\n"
+	} else if m.dockerHubActive {
+		menuView += "\n" + menuTitleStyle.Render("DOCKER HUB") + "\n"
+		menuView += menuItemStyle.Render("● Hub Search") + "\n"
+		menuView += menuItemStyle.Render("options in box ↓") + "\n"
 	} else if m.dockerServicesActive {
 		menuView += "\n" + menuTitleStyle.Render("DOCKER") + "\n"
-		menuView += menuItemStyle.Render("g - Start service") + "\n"
-		menuView += menuItemStyle.Render("x - Stop service") + "\n"
-		menuView += menuItemStyle.Render("r - Restart service") + "\n"
-		menuView += menuItemStyle.Render("enter - Restart service") + "\n"
-		menuView += menuItemStyle.Render("i - Images") + "\n"
-		menuView += menuItemStyle.Render("s / / - Filter containers") + "\n"
-		menuView += menuItemStyle.Render("h - Search Docker Hub") + "\n"
-		menuView += menuItemStyle.Render("esc - Back") + "\n"
+		menuView += menuItemStyle.Render("● Services") + "\n"
+		menuView += menuItemStyle.Render("options in box ↓") + "\n"
 	} else if m.dockerImagesActive {
-		menuView += "\n" + menuTitleStyle.Render("DOCKER IMAGES") + "\n"
-		menuView += menuItemStyle.Render("enter/r - Run (config dialog)") + "\n"
-		menuView += menuItemStyle.Render("e - Exec into container") + "\n"
-		menuView += menuItemStyle.Render("x - Remove image") + "\n"
-		menuView += menuItemStyle.Render("i - Inspect image") + "\n"
-		menuView += menuItemStyle.Render("p - Prune unused") + "\n"
-		menuView += menuItemStyle.Render("d - Services") + "\n"
-		menuView += menuItemStyle.Render("s / / - Filter images") + "\n"
-		menuView += menuItemStyle.Render("h - Search Docker Hub") + "\n"
-		menuView += menuItemStyle.Render("esc - Back") + "\n"
+		menuView += "\n" + menuTitleStyle.Render("IMAGES") + "\n"
+		menuView += menuItemStyle.Render("● Images") + "\n"
+		menuView += menuItemStyle.Render("options in box ↓") + "\n"
 	} else if m.projectsActive {
 		menuView += "\n" + menuTitleStyle.Render("PROJECTS") + "\n"
 		menuView += menuItemStyle.Render("↑↓ - Select (arrow)") + "\n"
@@ -5313,8 +5373,12 @@ func (m model) View() string {
 		dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		divider := dividerStyle.Width(1).Height(containerHeight).Render(dividerRune)
 
-		// separate GitHub box UNDER the whole content row (bottom of window, full width)
+		// separate option box UNDER the whole content row (bottom of window, full width)
 		rowContent := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, divider, listPaneStyle.Width(rightWidth).Height(containerHeight).Render(rightPlaced))
+
+		// docker pull progress spinner
+		spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 		if m.githubActive {
 			ghBoxStyle := lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
@@ -5331,6 +5395,39 @@ func (m model) View() string {
 			ghKeys := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("  p:Pull u:Push  s:Status f:Fetch l:Log  r:Refresh  esc:Back")
 			ghBox := ghBoxStyle.Render(lipgloss.JoinVertical(lipgloss.Top, lipgloss.JoinHorizontal(lipgloss.Top, ghTitle, ghBody), ghKeys))
 			content = lipgloss.JoinVertical(lipgloss.Bottom, rowContent, ghBox)
+		} else if m.dockerHubActive || m.dockerServicesActive || m.dockerImagesActive {
+			// docker bottom options box — like github
+			boxStyle := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("45")).
+				Padding(0, 1).
+				Width(m.width - 6)
+			var title string
+			var keys string
+			if m.dockerHubActive {
+				title = lipgloss.NewStyle().Foreground(lipgloss.Color("45")).Bold(true).Render("🐳 Hub — ")
+				keys = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("type to search live  enter/p:Pull  r:Run  s:focus  tab:toggle  esc:Back")
+			} else if m.dockerImagesActive {
+				title = lipgloss.NewStyle().Foreground(lipgloss.Color("45")).Bold(true).Render("🐳 Images — ")
+				keys = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("enter/r:Run  e:Exec  x:Remove  i:Inspect  p:Prune  d:Services  h:Hub  esc:Back")
+			} else {
+				title = lipgloss.NewStyle().Foreground(lipgloss.Color("45")).Bold(true).Render("🐳 Docker — ")
+				keys = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("g:Start  x:Stop  r:Restart  i:Images  s:Filter  h:Hub  esc:Back")
+			}
+			var lines []string
+			lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, title, keys))
+			if m.dockerPulling {
+				sp := spinners[m.dockerPullSpinner%len(spinners)]
+				statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
+				statusLine := statusStyle.Render(fmt.Sprintf("%s Pulling %s — %s", sp, m.dockerPullImage, truncateString(m.dockerPullStatus, 60)))
+				// right side of the bottom box, as requested
+				statusRight := lipgloss.PlaceHorizontal(m.width-8, lipgloss.Right, statusLine)
+				lines = append(lines, statusRight)
+			} else if m.dockerHubActive && m.dockerHubSearching {
+				lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("searching..."))
+			}
+			box := boxStyle.Render(lipgloss.JoinVertical(lipgloss.Top, lines...))
+			content = lipgloss.JoinVertical(lipgloss.Bottom, rowContent, box)
 		} else {
 			content = rowContent
 		}
