@@ -4918,13 +4918,9 @@ func (m model) View() string {
 		menuView += menuItemStyle.Render("esc - Back") + "\n"
 	} else if m.githubActive {
 		menuView += "\n" + menuTitleStyle.Render("GITHUB") + "\n"
-		menuView += menuItemStyle.Render("a - Clone (paste URL, enter)") + "\n"
-		menuView += m.githubInput.View() + "\n"
-		menuView += menuItemStyle.Render("c - Commit (enter msg)") + "\n"
-		menuView += m.githubCommitInput.View() + "\n"
-		menuView += menuItemStyle.Render("p - Pull  u - Push") + "\n"
-		menuView += menuItemStyle.Render("s - Status  f - Fetch  l - Log") + "\n"
-		menuView += menuItemStyle.Render("r - Refresh  esc - Back") + "\n"
+		menuView += menuItemStyle.Render("● GitHub Hub") + "\n"
+		menuView += menuItemStyle.Render("a:Clone  c:Commit") + "\n"
+		// detailed options moved to bottom box in front of sidebar (see leftPane bottom)
 	} else if m.dockerServicesActive {
 		menuView += "\n" + menuTitleStyle.Render("DOCKER") + "\n"
 		menuView += menuItemStyle.Render("g - Start service") + "\n"
@@ -5308,10 +5304,32 @@ func (m model) View() string {
 	if m.menuHidden {
 		content = listPaneStyle.Width(rightWidth).Height(containerHeight).Render(rightPlaced)
 	} else {
+		leftPaneContent := menuView
+		// GitHub bottom box in front of sidebar at bottom — as requested
+		if m.githubActive {
+			ghBoxStyle := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("42")).
+				Padding(0, 1).
+				Width(m.menuWidth - 2)
+			ghTitle := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true).Align(lipgloss.Center).Render("GitHub Options")
+			ghBody := lipgloss.JoinVertical(lipgloss.Top,
+				lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("a:Clone"),
+				m.githubInput.View(),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("c:Commit"),
+				m.githubCommitInput.View(),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("p:Pull u:Push s:Status"),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("f:Fetch l:Log r:Refresh"),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("esc:Back"),
+			)
+			ghBox := ghBoxStyle.Render(lipgloss.JoinVertical(lipgloss.Top, ghTitle, ghBody))
+			// place box at bottom of sidebar, in front
+			leftPaneContent = lipgloss.JoinVertical(lipgloss.Top, menuView, "", ghBox)
+		}
 		leftPane := menuPaneStyle.
 			Width(m.menuWidth).
 			Height(containerHeight).
-			Render(menuView)
+			Render(leftPaneContent)
 
 		dividerRune := "│"
 		dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
