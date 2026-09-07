@@ -171,12 +171,14 @@ type storedItem struct {
 }
 
 type storedProject struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Pinned bool   `json:"pinned,omitempty"`
 }
 
 type project struct {
 	name, path string
+	pinned     bool
 }
 
 type bookmark struct {
@@ -230,7 +232,12 @@ func (i item) Description() string {
 }
 func (i item) FilterValue() string { return i.title }
 
-func (p project) Title() string       { return p.name }
+func (p project) Title() string {
+	if p.pinned {
+		return "📌 " + p.name
+	}
+	return p.name
+}
 func (p project) Description() string { return p.path }
 func (p project) FilterValue() string { return p.name }
 
@@ -754,8 +761,16 @@ func initialModel() model {
 	}
 
 	projectItems := make([]list.Item, 0, len(storedProjects))
+	// pinned first, then rest
 	for _, p := range storedProjects {
-		projectItems = append(projectItems, project{name: p.Name, path: p.Path})
+		if p.Pinned {
+			projectItems = append(projectItems, project{name: p.Name, path: p.Path, pinned: p.Pinned})
+		}
+	}
+	for _, p := range storedProjects {
+		if !p.Pinned {
+			projectItems = append(projectItems, project{name: p.Name, path: p.Path, pinned: p.Pinned})
+		}
 	}
 
 	delegate := newItemDelegate()
@@ -3294,12 +3309,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 
-					m.projectsList.InsertItem(0, project{name: name, path: path})
-					m.projectsList.Select(0)
+					// insert after pinned so pinned stay at top
+					pinnedCount := 0
+					for _, it := range m.projectsList.Items() {
+						if p, ok := it.(project); ok && p.pinned {
+							pinnedCount++
+						}
+					}
+					m.projectsList.InsertItem(pinnedCount, project{name: name, path: path})
+					m.projectsList.Select(pinnedCount)
 					if err := saveProjects(listProjectsToStored(m.projectsList.Items())); err != nil {
 						m.lastAction = "Project added, but failed to save: " + err.Error()
 					} else {
-						m.lastAction = "Project added: " + name + " (at top)"
+						m.lastAction = "Project added: " + name + " (after pinned)"
 					}
 					m.projectInputs[0].SetValue("")
 					m.projectInputs[1].SetValue("")
@@ -3454,6 +3476,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 						}
 						return m, openProjectAICmd(p.name, p.path, aiMenuBin)
+					}
+					return m, nil
+
+				case "p", "P":
+					idx := m.projectsList.Index()
+					if idx < 0 || idx >= len(m.projectsList.Items()) {
+						return m, nil
+					}
+					if proj, ok := m.projectsList.SelectedItem().(project); ok {
+						m.projectsList.RemoveItem(idx)
+						proj.pinned = !proj.pinned
+						// reinsert to keep pinned at top
+						newPos := 0
+						if proj.pinned {
+							// insert before first unpinned
+							for i, it := range m.projectsList.Items() {
+								if pp, ok := it.(project); ok && !pp.pinned {
+									newPos = i
+									break
+								}
+								newPos = i + 1
+							}
+						} else {
+							// unpinned: after last pinned
+							pinnedCount := 0
+							for _, it := range m.projectsList.Items() {
+								if pp, ok := it.(project); ok && pp.pinned {
+									pinnedCount++
+								}
+							}
+							newPos = pinnedCount
+						}
+						if newPos < 0 {
+							newPos = 0
+						}
+						if newPos > len(m.projectsList.Items()) {
+							newPos = len(m.projectsList.Items())
+						}
+						m.projectsList.InsertItem(newPos, proj)
+						m.projectsList.Select(newPos)
+						_ = saveProjects(listProjectsToStored(m.projectsList.Items()))
+						if proj.pinned {
+							m.lastAction = "📌 Pinned: " + proj.name + " (now at top)"
+						} else {
+							m.lastAction = "Unpinned: " + proj.name
+						}
 					}
 					return m, nil
 
@@ -4129,13 +4197,21 @@ func (m model) View() string {
 
 	if m.projectsActive {
 		menuView += menuTitleStyle.Render("PROJECTS") + "\n"
-		menuView += menuItemStyle.Render("a - Add Project") + "\n"
-		menuView += menuItemStyle.Render("d - Delete Project") + "\n"
-		menuView += menuItemStyle.Render("x - Auto Find Projects") + "\n"
-		menuView += menuItemStyle.Render("n - Open in nvim") + "\n"
-		menuView += menuItemStyle.Render("t - Open Terminal") + "\n"
-		menuView += menuItemStyle.Render("f - Open in Thunar") + "\n"
-		menuView += menuItemStyle.Render("c - Open in VS Code") + "\n"
+		menuView += menuItemStyle.Render("↑↓ - Select (arrow)") + "\n"
+		menuView += menuItemStyle.Render("enter/t - Terminal") + "\n"
+		menuView += menuItemStyle.Render("p - Pin/unpin (top)") + "\n"
+		menuView += menuItemStyle.Render("o - opencode") + "\n"
+		menuView += menuItemStyle.Render("h - hermes") + "\n"
+		menuView += menuItemStyle.Render("l - claude") + "\n"
+		menuView += menuItemStyle.Render("k - codex") + "\n"
+		menuView += menuItemStyle.Render("m - ai-menu") + "\n"
+		menuView += menuItemStyle.Render("n - nvim") + "\n"
+		menuView += menuItemStyle.Render("c - VS Code") + "\n"
+		menuView += menuItemStyle.Render("f - File manager") + "\n"
+		menuView += menuItemStyle.Render("a - Add (top)") + "\n"
+		menuView += menuItemStyle.Render("d - Delete") + "\n"
+		menuView += menuItemStyle.Render("s - Search") + "\n"
+		menuView += menuItemStyle.Render("x - Auto-discover") + "\n"
 		menuView += menuItemStyle.Render("esc - Back") + "\n"
 		if m.projectAddMode {
 			menuView += "\n" + menuTitleStyle.Render("ADD PROJECT") + "\n"
@@ -4282,6 +4358,7 @@ func (m model) View() string {
 		menuView += "\n" + menuTitleStyle.Render("PROJECTS") + "\n"
 		menuView += menuItemStyle.Render("↑↓ - Select (arrow)") + "\n"
 		menuView += menuItemStyle.Render("enter/t - Terminal") + "\n"
+		menuView += menuItemStyle.Render("p - Pin/unpin (top)") + "\n"
 		menuView += menuItemStyle.Render("o - opencode") + "\n"
 		menuView += menuItemStyle.Render("h - hermes") + "\n"
 		menuView += menuItemStyle.Render("l - claude") + "\n"
@@ -5283,7 +5360,7 @@ func listProjectsToStored(items []list.Item) []storedProject {
 		if !ok {
 			continue
 		}
-		out = append(out, storedProject{Name: p.name, Path: p.path})
+		out = append(out, storedProject{Name: p.name, Path: p.path, Pinned: p.pinned})
 	}
 	return out
 }
