@@ -27,7 +27,7 @@ import (
 const (
 	dockerComposePath    = "/home/ixi_flower/Documents/server/docker-compose.yml"
 	noteAutosaveDebounce = 500 * time.Millisecond
-	htopRefreshInterval  = 500 * time.Millisecond
+	htopRefreshInterval  = 2 * time.Second
 	hubSearchDebounce    = 600 * time.Millisecond
 )
 
@@ -589,15 +589,7 @@ func dockerHubPullCmd(image string) tea.Cmd {
 	}
 }
 
-// Beautiful htop — ASCII animations + bars (butiful)
-var htopSpinners = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-var htopHearts = []string{"♥", "♡", "♥", "♡"}
-var htopCats = []string{
-	" /\\_/\\  ",
-	" ( o.o ) ",
-	"  > ^ <  ",
-}
-
+// Clean htop — minimal, not colorful
 func htopBar(percent int, width int) string {
 	if percent < 0 {
 		percent = 0
@@ -607,51 +599,18 @@ func htopBar(percent int, width int) string {
 	}
 	filled := percent * width / 100
 	empty := width - filled
-	filledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+	// subtle single accent, not rainbow
+	filledStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	emptyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	barFilled := filledStyle.Render(strings.Repeat("█", filled))
 	barEmpty := emptyStyle.Render(strings.Repeat("░", empty))
-	pctStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
+	pctStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	return fmt.Sprintf("%s%s %s", barFilled, barEmpty, pctStyle.Render(fmt.Sprintf("%3d%%", percent)))
 }
 
-func htopMiniSparkline(vals []float64) string {
-	blocks := []string{"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
-	var b strings.Builder
-	maxV := 1.0
-	for _, v := range vals {
-		if v > maxV {
-			maxV = v
-		}
-	}
-	for _, v := range vals {
-		idx := int(v / maxV * 7)
-		if idx < 0 {
-			idx = 0
-		}
-		if idx > 7 {
-			idx = 7
-		}
-		b.WriteString(blocks[idx])
-	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Render(b.String())
-}
-
-// Function to get system stats similar to htop — now beautiful with ASCII animations
+// Function to get system stats similar to htop — clean, not messy
 func getSystemStats() (string, error) {
 	var stats strings.Builder
-
-	// animation frame based on time (live)
-	frame := int(time.Now().UnixMilli()/200) % len(htopSpinners)
-	spinner := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true).Render(htopSpinners[frame])
-	heart := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render(htopHearts[frame%len(htopHearts)])
-	catIdx := frame % 3
-	catLine := lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Render(htopCats[catIdx])
-
-	// header with animation
-	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true).Underline(true)
-	stats.WriteString(titleStyle.Render(fmt.Sprintf("%s HTOP %s %s", spinner, heart, catLine)) + "\n")
-	stats.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("─"+strings.Repeat("─", 28)) + "\n")
 
 	// CPU
 	cpuCount := 0
@@ -665,7 +624,6 @@ func getSystemStats() (string, error) {
 	if cpuCount == 0 {
 		cpuCount = 1
 	}
-	// load avg for CPU bar
 	load1 := 0.0
 	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
 		fmt.Sscanf(strings.TrimSpace(string(data)), "%f", &load1)
@@ -674,8 +632,8 @@ func getSystemStats() (string, error) {
 	if cpuPct > 100 {
 		cpuPct = 100
 	}
-	cpuLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(fmt.Sprintf("CPU %d cores", cpuCount))
-	stats.WriteString(fmt.Sprintf("%s %s\n", cpuLabel, htopBar(cpuPct, 12)))
+	cpuLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf("CPU %d", cpuCount))
+	stats.WriteString(fmt.Sprintf("%s %s\n", cpuLabel, htopBar(cpuPct, 14)))
 
 	// Memory
 	var memTotal, memAvail int64
@@ -693,26 +651,20 @@ func getSystemStats() (string, error) {
 	if memTotal > 0 {
 		memUsedPct = int((memTotal - memAvail) * 100 / memTotal)
 	}
-	memLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("MEM")
-	stats.WriteString(fmt.Sprintf("%s %s\n", memLabel, htopBar(memUsedPct, 12)))
+	memLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("MEM")
+	stats.WriteString(fmt.Sprintf("%s %s\n", memLabel, htopBar(memUsedPct, 14)))
 
-	// Load average sparkline + values
+	// Load average (plain, no sparkline)
 	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
 		fields := strings.Fields(strings.TrimSpace(string(data)))
 		if len(fields) >= 3 {
-			var vals []float64
-			for i := 0; i < 3; i++ {
-				var v float64
-				fmt.Sscanf(fields[i], "%f", &v)
-				vals = append(vals, v)
-			}
-			loadLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("LOAD")
-			valsStr := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Render(fmt.Sprintf("%s %s %s", fields[0], fields[1], fields[2]))
-			stats.WriteString(fmt.Sprintf("%s %s %s\n", loadLabel, htopMiniSparkline(vals), valsStr))
+			loadLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("LOAD")
+			valsStr := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(fmt.Sprintf("%s %s %s", fields[0], fields[1], fields[2]))
+			stats.WriteString(fmt.Sprintf("%s %s\n", loadLabel, valsStr))
 		}
 	}
 
-	// Processes + uptime
+	// Processes + uptime (plain)
 	procCount := 0
 	if files, err := os.ReadDir("/proc"); err == nil {
 		for _, f := range files {
@@ -728,15 +680,10 @@ func getSystemStats() (string, error) {
 		d := time.Duration(up * float64(time.Second))
 		uptimeStr = fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
 	}
-	procLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("PROCS")
-	procVal := lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Bold(true).Render(fmt.Sprintf("%d", procCount))
-	upVal := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Render(uptimeStr)
-	stats.WriteString(fmt.Sprintf("%s %s  %s %s\n", procLabel, procVal, lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("UP"), upVal))
-
-	// tiny ASCII wave animation bottom
-	waveFrames := []string{"▁▂▃▄▅▆▇█▇▆▅▄▃▂▁", "▂▃▄▅▆▇█▇▆▅▄▃▂▁▁", "▃▄▅▆▇█▇▆▅▄▃▂▁▁▂"}
-	wave := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Render(waveFrames[frame%len(waveFrames)])
-	stats.WriteString(wave + " " + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("butiful htop ♥"))
+	procLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("PROCS")
+	procVal := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(fmt.Sprintf("%d", procCount))
+	upVal := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(uptimeStr)
+	stats.WriteString(fmt.Sprintf("%s %s  %s %s\n", procLabel, procVal, lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("UP"), upVal))
 
 	return stats.String(), nil
 }
@@ -4089,20 +4036,15 @@ func (m model) View() string {
 	showLogo := m.width >= 80
 
 	if m.htopActive {
-		// butiful htop with animated border color and ASCII
-		animColors := []string{"51", "86", "205", "229", "46"}
-		borderColor := animColors[m.htopFrame%len(animColors)]
 		htopTitle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color(borderColor)).
-			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("252")).
 			Bold(true).
 			Align(lipgloss.Center).
-			Padding(0, 1).
-			Render(fmt.Sprintf(" ✦ HTOP %s ✦ ", htopSpinners[m.htopFrame%len(htopSpinners)]))
+			Render("HTOP")
 
 		htopContent := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(borderColor)).
+			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1).
 			Width(52).
 			Render(m.htopOutput)
