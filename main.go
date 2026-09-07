@@ -318,6 +318,7 @@ type model struct {
 	noteSaveSeq           int
 	noteSaveErr           error
 	noteHasUnsavedChanges bool
+	noteKeybindsVisible   bool
 
 	// Htop functionality
 	htopActive bool
@@ -2692,6 +2693,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastAction = "Category list (Enter: select, Esc: close)"
 				return m, nil
 
+			case "ctrl+k":
+				if m.noteFullscreen {
+					m.noteKeybindsVisible = !m.noteKeybindsVisible
+					if m.noteKeybindsVisible {
+						m.lastAction = "Note keybinds shown (Ctrl+K to hide) — tiny vertical"
+					} else {
+						m.lastAction = "Note keybinds hidden"
+					}
+					return m, nil
+				}
+				m.lastAction = "Keybinds only in fullscreen (Ctrl+F) then Ctrl+K"
+				return m, nil
+
 			case "ctrl+g":
 				// Create new category
 				m.noteCategoryAddMode = true
@@ -4192,6 +4206,48 @@ func noteShortcutsTable(width int) string {
 	return lipgloss.JoinVertical(lipgloss.Top, title, b.String())
 }
 
+func tinyNoteShortcutsTable(width int) string {
+	// very tiny vertical — for Ctrl+K in fullscreen
+	if width < 20 {
+		width = 20
+	}
+	tableWidth := 22
+	if width < 24 {
+		tableWidth = width - 2
+	}
+	inner := tableWidth - 2
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true).Align(lipgloss.Center)
+	cellStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Align(lipgloss.Left).PaddingLeft(1)
+
+	top := borderStyle.Render("┌" + strings.Repeat("─", inner) + "┐")
+	bot := borderStyle.Render("└" + strings.Repeat("─", inner) + "┘")
+	header := borderStyle.Render("│") + headerStyle.Width(inner).Render("Keys") + borderStyle.Render("│")
+	sep := borderStyle.Render("├" + strings.Repeat("─", inner) + "┤")
+
+	rows := []string{
+		"G:New",
+		"S:Save",
+		"L:List",
+		"↵:Select",
+		"e:Edit",
+		"c:Color",
+		"d:Del",
+		"↑↓:Nav",
+		"Esc:Back",
+		"K:Close",
+	}
+	var b strings.Builder
+	b.WriteString(top + "\n")
+	b.WriteString(header + "\n")
+	b.WriteString(sep + "\n")
+	for _, r := range rows {
+		b.WriteString(borderStyle.Render("│") + cellStyle.Width(inner).Render(truncateString(r, inner-1)) + borderStyle.Render("│") + "\n")
+	}
+	b.WriteString(bot)
+	return b.String()
+}
+
 func isTaskLine(line string) bool {
 	trim := strings.TrimSpace(line)
 	return strings.HasPrefix(trim, "- [ ]") || strings.HasPrefix(trim, "- [x]") || strings.HasPrefix(trim, "- [X]") || strings.HasPrefix(trim, "☐") || strings.HasPrefix(trim, "☑")
@@ -4986,10 +5042,15 @@ func (m model) View() string {
 			noteView = categoryInfo + "\n" + m.noteInput.View()
 		}
 
-		// show keybinds only in fullscreen, vertical table at bottom
-		if m.noteFullscreen && (m.noteCategoryListOpen || m.noteCategoryMenuOpen || m.noteCategoryAddMode || m.noteCategoryEditMode) {
-			shortcutsTable := noteShortcutsTable(m.width)
-			noteView = lipgloss.JoinVertical(lipgloss.Top, noteView, "", shortcutsTable)
+		// show keybinds only in fullscreen — tiny vertical when Ctrl+K
+		if m.noteFullscreen {
+			if m.noteKeybindsVisible {
+				shortcutsTable := tinyNoteShortcutsTable(m.width)
+				noteView = lipgloss.JoinVertical(lipgloss.Top, noteView, "", shortcutsTable)
+			} else if m.noteCategoryListOpen || m.noteCategoryMenuOpen || m.noteCategoryAddMode || m.noteCategoryEditMode {
+				shortcutsTable := noteShortcutsTable(m.width)
+				noteView = lipgloss.JoinVertical(lipgloss.Top, noteView, "", shortcutsTable)
+			}
 		}
 
 		if m.noteFullscreen {
