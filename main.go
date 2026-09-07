@@ -352,6 +352,7 @@ type model struct {
 	dockerPullImage   string
 	dockerPullStatus  string
 	dockerPullSpinner int
+	dockerPullLayers  []dockerPullLayer
 
 	// GitHub — clone via link, commit/push/pull for projects
 	githubActive      bool
@@ -494,6 +495,13 @@ type dockerHubSearchMsg struct {
 type dockerHubPullMsg struct {
 	image string
 	err   error
+}
+
+type dockerPullLayer struct {
+	id       string
+	progress string // e.g. "[===>  ]  12MB/45MB"
+	pct      int
+	complete bool
 }
 
 type dockerPullTickMsg struct{}
@@ -647,8 +655,83 @@ func searchDockerHub(query string) ([]list.Item, error) {
 var (
 	pullProgressMu   sync.Mutex
 	pullProgressLine string
+	pullLayers       = map[string]dockerPullLayer{}
+	layerOrder       []string
 	ansiRe           = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 )
+
+// parse "2ef2504eea03: Downloading [===>    ]  12.5MB/45.2MB" or "... Extracting ..."
+func parsePullLine(line string) (id, progress string, pct int, complete bool, ok bool) {
+	idx := strings.Index(line, ":")
+	if idx <= 0 || idx > 20 {
+		return "", "", 0, false, false
+	}
+	id = line[:idx]
+	rest := strings.TrimSpace(line[idx+1:])
+	switch {
+	case strings.HasPrefix(rest, "Pulling fs"):
+		return id, "Pulling", 0, false, true
+	case rest == "Waiting" || strings.HasPrefix(rest, "Waiting"):
+		return id, "Waiting", 0, false, true
+	case rest == "Already exists":
+		return id, "Already exists", 100, true, true
+	case rest == "Pull complete":
+		return id, "Pull complete", 100, true, true
+	case strings.Contains(rest, "/"):
+		// progress line with bar and "X/Y" size
+		prog := ""
+		if i := strings.Index(rest, "["); i >= 0 {
+			if j := strings.Index(rest, "]"); j > i {
+				prog = rest[i : j+1]
+			}
+		}
+		// find sizes like 12.5MB/45.2MB
+		fields := strings.Fields(rest)
+		sizes := ""
+		for _, f := range fields {
+			if strings.Contains(f, "/") && (strings.HasSuffix(f, "B") || strings.HasSuffix(f, "kB") || strings.HasSuffix(f, "MB") || strings.HasSuffix(f, "GB")) {
+				sizes = f
+				break
+			}
+		}
+		pct = 0
+		if sizes != "" {
+			parts := strings.SplitN(sizes, "/", 2)
+			cur, _ := strconv.ParseFloat(strings.TrimSuffix(parts[0], "MB"), 64)
+			tot, _ := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(parts[1], "MB"), "GB"), "kB"), 64)
+			cur = scaleToMB(parts[0])
+			tot = scaleToMB(parts[1])
+			if tot > 0 {
+				pct = int(cur / tot * 100)
+				if pct > 100 {
+					pct = 100
+				}
+			}
+		}
+		if prog == "" {
+			prog = fmt.Sprintf("%3d%%", pct)
+		}
+		return id, prog + " " + sizes, pct, false, true
+	case strings.HasPrefix(rest, "Verifying"):
+		return id, "Verifying", 95, false, true
+	}
+	return "", "", 0, false, false
+}
+
+func scaleToMB(s string) float64 {
+	s = strings.TrimSpace(s)
+	v, _ := strconv.ParseFloat(s[:len(s)-2], 64) // strip 2-char unit
+	if strings.HasSuffix(s, "GB") {
+		return v * 1024
+	}
+	if strings.HasSuffix(s, "kB") {
+		return v / 1024
+	}
+	if strings.HasSuffix(s, "B") {
+		return v / (1024 * 1024)
+	}
+	return v // MB
+}
 
 // split on both \r and \n — docker pull writes progress with \r
 func scanCRLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
@@ -665,6 +748,12 @@ func scanCRLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
 }
 
 func dockerHubPullCmd(image string) tea.Cmd {
+	// reset layer tracking for a fresh pull
+	pullProgressMu.Lock()
+	pullLayers = map[string]dockerPullLayer{}
+	layerOrder = nil
+	pullProgressLine = ""
+	pullProgressMu.Unlock()
 	var runPull tea.Cmd = func() tea.Msg {
 		cmd := exec.Command("docker", "pull", image)
 		pr, pw := io.Pipe()
@@ -674,19 +763,20 @@ func dockerHubPullCmd(image string) tea.Cmd {
 			scanner := bufio.NewScanner(pr)
 			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 			scanner.Split(scanCRLF)
-			var recent []string
 			for scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
 				line = ansiRe.ReplaceAllString(line, "")
 				if line == "" {
 					continue
 				}
-				recent = append(recent, line)
-				if len(recent) > 3 {
-					recent = recent[1:]
-				}
 				pullProgressMu.Lock()
-				pullProgressLine = strings.Join(recent, "  |  ")
+				pullProgressLine = line
+				if id, prog, pct, complete, ok := parsePullLine(line); ok {
+					if _, seen := pullLayers[id]; !seen {
+						layerOrder = append(layerOrder, id)
+					}
+					pullLayers[id] = dockerPullLayer{id: id, progress: prog, pct: pct, complete: complete}
+				}
 				pullProgressMu.Unlock()
 			}
 		}()
@@ -5454,16 +5544,51 @@ func (m model) View() string {
 			var lines []string
 			lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, title, keys))
 			if m.dockerPulling {
-				sp := spinners[m.dockerPullSpinner%len(spinners)]
-				statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
-				// full status, no truncation — compact form: image + raw docker line
-				compact := m.dockerPullStatus
-				if len(compact) > 140 {
-					compact = compact[:140]
+				pullProgressMu.Lock()
+				ids := make([]string, len(layerOrder))
+				copy(ids, layerOrder)
+				layers := make(map[string]dockerPullLayer, len(pullLayers))
+				for k, v := range pullLayers {
+					layers[k] = v
 				}
-				statusLine := statusStyle.Render(fmt.Sprintf("%s Pulling %s — %s", sp, m.dockerPullImage, compact))
-				statusRight := lipgloss.PlaceHorizontal(m.width-8, lipgloss.Right, statusLine)
-				lines = append(lines, statusRight)
+				pullProgressMu.Unlock()
+
+				barStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("51"))
+				doneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+				idStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+				maxShow := 3
+				shown := 0
+				for _, id := range ids {
+					if shown >= maxShow {
+						break
+					}
+					l := layers[id]
+					if len(id) > 12 {
+						id = id[:12]
+					}
+					label := fmt.Sprintf("%-12s ", idStyle.Render(id))
+					if l.complete {
+						lines = append(lines, label+doneStyle.Render("✔ "+l.progress))
+						shown++
+						continue
+					}
+					// render bar: 20 wide, filled by pct
+					w := 20
+					filled := l.pct * w / 100
+					if filled > w {
+						filled = w
+					}
+					bar := strings.Repeat("█", filled) + strings.Repeat("░", w-filled)
+					lines = append(lines, label+barStyle.Render(bar)+fmt.Sprintf(" %3d%% %s", l.pct, l.progress))
+					shown++
+				}
+				if len(ids) > maxShow {
+					lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf("  … +%d more layers", len(ids)-maxShow)))
+				}
+				if len(ids) == 0 {
+					sp := spinners[m.dockerPullSpinner%len(spinners)]
+					lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true).Render(sp+" starting pull of "+m.dockerPullImage+"..."))
+				}
 			} else if m.dockerHubActive && m.dockerHubSearching {
 				lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("searching..."))
 			}
