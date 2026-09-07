@@ -5304,38 +5304,36 @@ func (m model) View() string {
 	if m.menuHidden {
 		content = listPaneStyle.Width(rightWidth).Height(containerHeight).Render(rightPlaced)
 	} else {
-		leftPaneContent := menuView
-		// GitHub bottom box in front of sidebar at bottom — as requested
-		if m.githubActive {
-			ghBoxStyle := lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("42")).
-				Padding(0, 1).
-				Width(m.menuWidth - 2)
-			ghTitle := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true).Align(lipgloss.Center).Render("GitHub Options")
-			ghBody := lipgloss.JoinVertical(lipgloss.Top,
-				lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("a:Clone"),
-				m.githubInput.View(),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("c:Commit"),
-				m.githubCommitInput.View(),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("p:Pull u:Push s:Status"),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("f:Fetch l:Log r:Refresh"),
-				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("esc:Back"),
-			)
-			ghBox := ghBoxStyle.Render(lipgloss.JoinVertical(lipgloss.Top, ghTitle, ghBody))
-			// place box at bottom of sidebar, in front
-			leftPaneContent = lipgloss.JoinVertical(lipgloss.Top, menuView, "", ghBox)
-		}
 		leftPane := menuPaneStyle.
 			Width(m.menuWidth).
 			Height(containerHeight).
-			Render(leftPaneContent)
+			Render(menuView)
 
 		dividerRune := "│"
 		dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		divider := dividerStyle.Width(1).Height(containerHeight).Render(dividerRune)
 
-		content = lipgloss.JoinHorizontal(lipgloss.Top, leftPane, divider, listPaneStyle.Width(rightWidth).Height(containerHeight).Render(rightPlaced))
+		// separate GitHub box UNDER the whole content row (bottom of window, full width)
+		rowContent := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, divider, listPaneStyle.Width(rightWidth).Height(containerHeight).Render(rightPlaced))
+		if m.githubActive {
+			ghBoxStyle := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("42")).
+				Padding(0, 1).
+				Width(m.width - 6)
+			ghTitle := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true).Render("🐙 GitHub — ")
+			ghBody := lipgloss.JoinHorizontal(lipgloss.Top,
+				lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("a:Clone "),
+				m.githubInput.View(),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("  c:Commit "),
+				m.githubCommitInput.View(),
+			)
+			ghKeys := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("  p:Pull u:Push  s:Status f:Fetch l:Log  r:Refresh  esc:Back")
+			ghBox := ghBoxStyle.Render(lipgloss.JoinVertical(lipgloss.Top, lipgloss.JoinHorizontal(lipgloss.Top, ghTitle, ghBody), ghKeys))
+			content = lipgloss.JoinVertical(lipgloss.Bottom, rowContent, ghBox)
+		} else {
+			content = rowContent
+		}
 	}
 
 	mainView := lipgloss.JoinVertical(lipgloss.Top, logo, content)
