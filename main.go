@@ -343,6 +343,12 @@ type model struct {
 	torStatus string
 	torIP     string
 
+	// GitHub — clone via link, commit/push/pull for projects
+	githubActive      bool
+	githubInput       textinput.Model
+	githubList        list.Model
+	githubCommitInput textinput.Model
+
 	// Clock functionality
 	clock      clockModel
 	clockActive bool
@@ -393,6 +399,16 @@ func newDockerHubDelegate() list.DefaultDelegate {
 	d.Styles.SelectedTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true).Align(lipgloss.Center)
 	d.Styles.SelectedDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Align(lipgloss.Center)
 	d.Styles.FilterMatch = lipgloss.NewStyle().Foreground(lipgloss.Color("201")).Bold(true)
+	return d
+}
+
+func newGithubDelegate() list.DefaultDelegate {
+	d := list.NewDefaultDelegate()
+	d.Styles.NormalTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Align(lipgloss.Center)
+	d.Styles.NormalDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Align(lipgloss.Center)
+	d.Styles.SelectedTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true).Align(lipgloss.Center)
+	d.Styles.SelectedDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Align(lipgloss.Center)
+	d.Styles.FilterMatch = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
 	return d
 }
 
@@ -474,6 +490,35 @@ type torStatusMsg struct {
 	status string
 	ip     string
 }
+
+type githubCloneMsg struct {
+	url  string
+	path string
+	err  error
+}
+
+type githubActionMsg struct {
+	action string
+	repo   string
+	err    error
+	output string
+}
+
+type githubRepo struct {
+	name   string
+	path   string
+	branch string
+	status string
+}
+
+func (g githubRepo) Title() string { return g.name }
+func (g githubRepo) Description() string {
+	if g.branch != "" {
+		return fmt.Sprintf("%s  %s  %s", g.branch, g.status, g.path)
+	}
+	return g.path
+}
+func (g githubRepo) FilterValue() string { return g.name }
 
 type hubSearchDebounceMsg struct {
 	Seq   int
@@ -595,6 +640,123 @@ func dockerHubPullCmd(image string) tea.Cmd {
 			return dockerHubPullMsg{image: image, err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))}
 		}
 		return dockerHubPullMsg{image: image, err: nil}
+	}
+}
+
+func getGithubRepos() ([]list.Item, error) {
+	var repos []list.Item
+	// from projects list + scan Documents
+	seen := map[string]bool{}
+	// scan projects via saved file
+	if stored, err := loadProjects(); err == nil {
+		for _, p := range stored {
+			if seen[p.Path] {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(p.Path, ".git")); err == nil {
+				branch := "main"
+				if out, err := exec.Command("git", "-C", p.Path, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+					branch = strings.TrimSpace(string(out))
+				}
+				status := ""
+				if out, err := exec.Command("git", "-C", p.Path, "status", "--porcelain").Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+					status = "● modified"
+				} else {
+					status = "○ clean"
+				}
+				repos = append(repos, githubRepo{name: p.Name, path: p.Path, branch: branch, status: status})
+				seen[p.Path] = true
+			}
+		}
+	}
+	// also scan ~/Documents for git repos not in projects
+	home, _ := os.UserHomeDir()
+	base := filepath.Join(home, "Documents")
+	if entries, err := os.ReadDir(base); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			fp := filepath.Join(base, e.Name())
+			if seen[fp] {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(fp, ".git")); err == nil {
+				branch := "main"
+				if out, err := exec.Command("git", "-C", fp, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+					branch = strings.TrimSpace(string(out))
+				}
+				status := ""
+				if out, err := exec.Command("git", "-C", fp, "status", "--porcelain").Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+					status = "● modified"
+				} else {
+					status = "○ clean"
+				}
+				repos = append(repos, githubRepo{name: e.Name(), path: fp, branch: branch, status: status})
+				seen[fp] = true
+			}
+		}
+	}
+	return repos, nil
+}
+
+func githubCloneCmd(urlStr string) tea.Cmd {
+	return func() tea.Msg {
+		u := strings.TrimSpace(urlStr)
+		if u == "" {
+			return githubCloneMsg{url: u, err: fmt.Errorf("empty url")}
+		}
+		// derive name
+		base := filepath.Base(strings.TrimSuffix(u, ".git"))
+		if base == "" || base == "." {
+			base = "repo"
+		}
+		home, _ := os.UserHomeDir()
+		dest := filepath.Join(home, "Documents", base)
+		if _, err := os.Stat(dest); err == nil {
+			return githubCloneMsg{url: u, path: dest, err: fmt.Errorf("already exists: %s", dest)}
+		}
+		cmd := exec.Command("git", "clone", u, dest)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return githubCloneMsg{url: u, path: dest, err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))}
+		}
+		return githubCloneMsg{url: u, path: dest, err: nil}
+	}
+}
+
+func githubActionCmd(repoPath, action, msg string) tea.Cmd {
+	return func() tea.Msg {
+		var cmd *exec.Cmd
+		switch action {
+		case "pull":
+			cmd = exec.Command("git", "-C", repoPath, "pull")
+		case "push":
+			cmd = exec.Command("git", "-C", repoPath, "push")
+		case "fetch":
+			cmd = exec.Command("git", "-C", repoPath, "fetch", "--all")
+		case "status":
+			cmd = exec.Command("git", "-C", repoPath, "status", "--short")
+		case "commit":
+			if strings.TrimSpace(msg) == "" {
+				msg = "update"
+			}
+			// add all and commit
+			add := exec.Command("git", "-C", repoPath, "add", "-A")
+			if out, err := add.CombinedOutput(); err != nil {
+				return githubActionMsg{action: action, repo: repoPath, err: fmt.Errorf("add: %w: %s", err, strings.TrimSpace(string(out)))}
+			}
+			cmd = exec.Command("git", "-C", repoPath, "commit", "-m", msg)
+		case "log":
+			cmd = exec.Command("git", "-C", repoPath, "log", "--oneline", "-10")
+		default:
+			return githubActionMsg{action: action, repo: repoPath, err: fmt.Errorf("unknown action %s", action)}
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return githubActionMsg{action: action, repo: repoPath, err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out))), output: strings.TrimSpace(string(out))}
+		}
+		return githubActionMsg{action: action, repo: repoPath, err: nil, output: strings.TrimSpace(string(out))}
 	}
 }
 
@@ -833,6 +995,30 @@ func initialModel() model {
 	dockerHubInput.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("51"))
 	dockerHubInput.Blur()
 
+	githubInput := textinput.New()
+	githubInput.Placeholder = "https://github.com/user/repo.git"
+	githubInput.Prompt = "GitHub: "
+	githubInput.CharLimit = 256
+	githubInput.Width = 40
+	githubInput.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	githubInput.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	githubInput.Blur()
+
+	githubCommitInput := textinput.New()
+	githubCommitInput.Placeholder = "commit message (enter to commit)"
+	githubCommitInput.Prompt = "Msg: "
+	githubCommitInput.CharLimit = 256
+	githubCommitInput.Width = 40
+	githubCommitInput.Blur()
+
+	ghDelegate := newGithubDelegate()
+	ghl := list.New([]list.Item{}, ghDelegate, 0, 0)
+	ghl.Title = "GitHub Repos"
+	ghl.SetShowTitle(false)
+	ghl.SetShowHelp(false)
+	ghl.SetFilteringEnabled(true)
+	ghl.SetShowFilter(false)
+
 	nameInput := textinput.New()
 	nameInput.Placeholder = "Script name"
 	nameInput.Prompt = "Name: "
@@ -1016,6 +1202,9 @@ func initialModel() model {
 		imageRunContainerID:    "",
 		dockerHubList:          dhl,
 		dockerHubInput:         dockerHubInput,
+		githubList:             ghl,
+		githubInput:            githubInput,
+		githubCommitInput:      githubCommitInput,
 		clock:                  initialClockModel(0, 0), // Initialize with zero width/height, will be updated by WindowSizeMsg
 	}
 }
@@ -1690,12 +1879,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.searchInput.Width = max(10, listWidth-10)
 		m.dockerHubInput.Width = max(10, listWidth-10)
+		m.githubInput.Width = max(10, listWidth-10)
+		m.githubCommitInput.Width = max(10, listWidth-10)
 		m.list.SetSize(listWidth, listHeight)
 		m.bookmarkList.SetSize(listWidth, listHeight)
 		m.projectsList.SetSize(listWidth, listHeight)
 		m.dockerList.SetSize(listWidth, listHeight)
 		m.dockerImageList.SetSize(listWidth, listHeight)
 		m.dockerHubList.SetSize(listWidth, listHeight)
+		m.githubList.SetSize(listWidth, listHeight)
 
 	case tickMsg, startMsg, pauseMsg, resetMsg: // Messages specific to the clock
 		if m.clockActive {
@@ -1863,6 +2055,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dockerHubSearching = true
 		m.lastAction = "Searching Hub for " + q + "..."
 		return m, searchDockerHubCmd(q)
+
+	case githubCloneMsg:
+		if msg.err != nil {
+			m.lastError = msg.err
+			m.lastAction = "Clone failed: " + msg.err.Error()
+		} else {
+			m.lastAction = "Cloned " + msg.url + " → " + msg.path
+			if repos, err := getGithubRepos(); err == nil {
+				m.githubList.SetItems(repos)
+			}
+			name := filepath.Base(msg.path)
+			// add to projects if not already there
+			found := false
+			for _, it := range m.projectsList.Items() {
+				if p, ok := it.(project); ok && p.path == msg.path {
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.projectsList.InsertItem(0, project{name: name, path: msg.path})
+				_ = saveProjects(listProjectsToStored(m.projectsList.Items()))
+			}
+		}
+		return m, nil
+
+	case githubActionMsg:
+		if msg.err != nil {
+			m.lastError = msg.err
+			m.lastAction = msg.action + " failed: " + msg.err.Error()
+			if msg.output != "" {
+				m.lastAction += " — " + truncateString(msg.output, 60)
+			}
+		} else {
+			if msg.output != "" {
+				m.lastAction = msg.action + " ok: " + truncateString(msg.output, 80)
+			} else {
+				m.lastAction = msg.action + " done for " + filepath.Base(msg.repo)
+			}
+			m.lastError = nil
+			if repos, err := getGithubRepos(); err == nil {
+				m.githubList.SetItems(repos)
+			}
+		}
+		return m, nil
 
 	case htopOutputMsg:
 		m.htopFrame++
@@ -3698,7 +3935,127 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dockerServicesActive = !m.dockerServicesActive
 			m.dockerImagesActive = false
 			m.scriptActive = false
-			if m.dockerServicesActive {
+			m.githubActive = false
+		if m.githubActive {
+			// clone input focused
+			if m.githubInput.Focused() {
+				switch msg.String() {
+				case "esc":
+					m.githubInput.Blur()
+					return m, nil
+				case "enter":
+					u := strings.TrimSpace(m.githubInput.Value())
+					if u == "" {
+						m.lastAction = "Enter GitHub URL to clone"
+						return m, nil
+					}
+					m.lastAction = "Cloning " + u + "..."
+					m.githubInput.Blur()
+					m.githubInput.SetValue("")
+					return m, githubCloneCmd(u)
+				case "tab":
+					m.githubInput.Blur()
+					m.githubCommitInput.Focus()
+					return m, nil
+				}
+				var c tea.Cmd
+				m.githubInput, c = m.githubInput.Update(msg)
+				return m, c
+			}
+			if m.githubCommitInput.Focused() {
+				switch msg.String() {
+				case "esc":
+					m.githubCommitInput.Blur()
+					return m, nil
+				case "enter":
+					commitMsg := strings.TrimSpace(m.githubCommitInput.Value())
+					if commitMsg == "" {
+						commitMsg = "update"
+					}
+					if sel, ok := m.githubList.SelectedItem().(githubRepo); ok {
+						m.lastAction = "Committing to " + sel.name + "..."
+						m.githubCommitInput.Blur()
+						m.githubCommitInput.SetValue("")
+						return m, githubActionCmd(sel.path, "commit", commitMsg)
+					}
+					m.lastAction = "Select a repo first"
+					return m, nil
+				case "tab":
+					m.githubCommitInput.Blur()
+					m.githubInput.Focus()
+					return m, nil
+				}
+				var c tea.Cmd
+				m.githubCommitInput, c = m.githubCommitInput.Update(msg)
+				return m, c
+			}
+			switch msg.String() {
+			case "esc", "g", "G":
+				m.githubActive = false
+				m.githubInput.Blur()
+				m.githubCommitInput.Blur()
+				m.lastAction = "Closed GitHub"
+				return m, nil
+			case "a", "A", "/":
+				m.githubInput.Focus()
+				return m, nil
+			case "c", "C":
+				if _, ok := m.githubList.SelectedItem().(githubRepo); ok {
+					m.githubCommitInput.Focus()
+					return m, nil
+				}
+				m.lastAction = "Select a repo to commit"
+				return m, nil
+			case "p", "P":
+				if sel, ok := m.githubList.SelectedItem().(githubRepo); ok {
+					m.lastAction = "Pulling " + sel.name + "..."
+					return m, githubActionCmd(sel.path, "pull", "")
+				}
+				return m, nil
+			case "u", "U":
+				if sel, ok := m.githubList.SelectedItem().(githubRepo); ok {
+					m.lastAction = "Pushing " + sel.name + "..."
+					return m, githubActionCmd(sel.path, "push", "")
+				}
+				return m, nil
+			case "s", "S":
+				if sel, ok := m.githubList.SelectedItem().(githubRepo); ok {
+					m.lastAction = "Status " + sel.name + "..."
+					return m, githubActionCmd(sel.path, "status", "")
+				}
+				// otherwise filter
+				m.githubList.SetFilterText(m.githubInput.Value())
+				m.githubInput.Focus()
+				return m, nil
+			case "f", "F":
+				if sel, ok := m.githubList.SelectedItem().(githubRepo); ok {
+					return m, githubActionCmd(sel.path, "fetch", "")
+				}
+				return m, nil
+			case "l", "L":
+				if sel, ok := m.githubList.SelectedItem().(githubRepo); ok {
+					return m, githubActionCmd(sel.path, "log", "")
+				}
+				return m, nil
+			case "r", "R":
+				if repos, err := getGithubRepos(); err == nil {
+					m.githubList.SetItems(repos)
+					m.lastAction = fmt.Sprintf("GitHub: %d repos", len(repos))
+				}
+				return m, nil
+			}
+			// filter typing
+			if len(msg.String()) == 1 && strings.Contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/.:", msg.String()) {
+				m.githubInput.Focus()
+				var c tea.Cmd
+				m.githubInput, c = m.githubInput.Update(msg)
+				return m, c
+			}
+			m.githubList, cmd = m.githubList.Update(msg)
+			return m, cmd
+		}
+
+		if m.dockerServicesActive {
 				m.bookmarksActive = false
 				m.projectsActive = false
 				m.lastAction = "Docker services opened (g:start x:stop r:restart i:images esc:back)"
@@ -3711,6 +4068,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dockerImagesActive = !m.dockerImagesActive
 			m.dockerServicesActive = false
 			m.scriptActive = false
+			m.githubActive = false
 			if m.dockerImagesActive {
 				m.bookmarksActive = false
 				m.projectsActive = false
@@ -3732,6 +4090,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "n":
 			m.scriptActive = false
+			m.githubActive = false
 			m.noteOpen = !m.noteOpen
 			if m.noteOpen {
 				m.noteFullscreen = false
@@ -3760,8 +4119,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastAction = "Opening kitty terminal..."
 			return m, openKittyTerminalCmd()
 
+		case "g", "G":
+			m.scriptActive = false
+			m.githubActive = !m.githubActive
+			if m.githubActive {
+				m.noteOpen = false
+				m.dockerServicesActive = false
+				m.dockerImagesActive = false
+				m.dockerHubActive = false
+				m.bookmarksActive = false
+				m.projectsActive = false
+				m.htopActive = false
+				m.clockActive = false
+				if repos, err := getGithubRepos(); err == nil {
+					m.githubList.SetItems(repos)
+				}
+				m.lastAction = "GitHub opened — a:clone  c:commit  p:pull  u:push  s:status  f:fetch  l:log  r:refresh  esc:close"
+				return m, nil
+			}
+			m.lastAction = "GitHub closed"
+			return m, nil
+
 		case "h", "H":
 			m.scriptActive = false
+			m.githubActive = false
 			m.htopActive = !m.htopActive
 			if m.htopActive {
 				m.lastAction = "htop activated"
@@ -3954,6 +4335,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c", "C":
 			// Handle clock activation
 			m.scriptActive = false
+			m.githubActive = false
 			m.clockActive = !m.clockActive
 			if m.clockActive {
 				m.noteOpen = false
@@ -3975,6 +4357,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "X":
 			m.scriptActive = false
+			m.githubActive = false
 			xrayProjectPath := "/etc/ixi-tui-main/xray"
 			if _, err := os.Stat(xrayProjectPath); os.IsNotExist(err) {
 				m.lastAction = "Xray project not found at: " + xrayProjectPath
@@ -3997,6 +4380,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "Y", "y":
 			m.scriptActive = false
+			m.githubActive = false
 			torProjectPath := "/etc/ixi-tui-main/tor"
 			if _, err := os.Stat(torProjectPath); os.IsNotExist(err) {
 				m.lastAction = "Tor project not found at: " + torProjectPath
@@ -4045,6 +4429,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Open projects section when not in edit mode
 			m.scriptActive = false
+			m.githubActive = false
 			m.projectsActive = true
 			m.lastAction = "Opened Projects"
 			return m, nil
@@ -4416,6 +4801,7 @@ func (m model) View() string {
 			"p - Projects",
 			"d - Docker",
 			"I - Images  (hub: h)",
+			"g - GitHub  (clone/push)",
 			"n - Notes  (sticky)",
 			"X - Xray  :10808/:10809",
 			"Y - Tor   :9050",
@@ -4530,6 +4916,15 @@ func (m model) View() string {
 		menuView += menuItemStyle.Render("s - focus search") + "\n"
 		menuView += menuItemStyle.Render("tab - toggle input/list") + "\n"
 		menuView += menuItemStyle.Render("esc - Back") + "\n"
+	} else if m.githubActive {
+		menuView += "\n" + menuTitleStyle.Render("GITHUB") + "\n"
+		menuView += menuItemStyle.Render("a - Clone (paste URL, enter)") + "\n"
+		menuView += m.githubInput.View() + "\n"
+		menuView += menuItemStyle.Render("c - Commit (enter msg)") + "\n"
+		menuView += m.githubCommitInput.View() + "\n"
+		menuView += menuItemStyle.Render("p - Pull  u - Push") + "\n"
+		menuView += menuItemStyle.Render("s - Status  f - Fetch  l - Log") + "\n"
+		menuView += menuItemStyle.Render("r - Refresh  esc - Back") + "\n"
 	} else if m.dockerServicesActive {
 		menuView += "\n" + menuTitleStyle.Render("DOCKER") + "\n"
 		menuView += menuItemStyle.Render("g - Start service") + "\n"
@@ -4658,6 +5053,18 @@ func (m model) View() string {
 			hubView += "  (no results)"
 		}
 		listView = lipgloss.JoinVertical(lipgloss.Top, titleView, hubView, activeList.View())
+		paneHeight = lipgloss.Height(listView)
+	} else if m.githubActive {
+		activeList = m.githubList
+		activeTitle = "GitHub Repos"
+		titleView := activeList.Styles.Title.Render(activeTitle)
+		inputsView := lipgloss.JoinVertical(lipgloss.Top, m.githubInput.View(), m.githubCommitInput.View())
+		if m.menuHidden {
+			listWidth := activeList.Width()
+			titleView = lipgloss.NewStyle().Width(listWidth).Align(lipgloss.Center).Render(activeTitle)
+			inputsView = lipgloss.NewStyle().Width(listWidth).Align(lipgloss.Center).Render(inputsView)
+		}
+		listView = lipgloss.JoinVertical(lipgloss.Top, titleView, inputsView, activeList.View())
 		paneHeight = lipgloss.Height(listView)
 	} else if m.bookmarksActive {
 		activeList = m.bookmarkList
@@ -4915,7 +5322,7 @@ func (m model) View() string {
 
 	mainView := lipgloss.JoinVertical(lipgloss.Top, logo, content)
 
-	footerText := "[q] quit  [m] toggle menu  [M] hide menu & center  [k] keybinds  [s/S] search  [n] notes(esc close, ctrl+f fullscreen)  [enter] run  [o] new terminal  [p] projects  [d] docker  [I] images  [h] htop  [X] xray  [Y] tor  [3] edit  [esc] exit edit  [u] sudo toggle  (edit: [p] proxy)  [[]/[]] resize split  [t] smassh  [T] kitty terminal  [docker: g=start x=stop r=restart i=images]  [images: r=run x=remove i=inspect p=prune]  [hub: live search  enter/p=pull r=run]  [projects: ↑↓ select enter=term o=opencode h=hermes l=claude k=codex m=ai-menu]"
+	footerText := "[q] quit  [m] toggle menu  [M] hide menu & center  [k] keybinds  [s/S] search  [n] notes(esc close, ctrl+f fullscreen)  [enter] run  [o] new terminal  [p] projects  [d] docker  [I] images  [h] htop  [X] xray  [Y] tor  [g] GitHub  [3] edit  [esc] exit edit  [u] sudo toggle  (edit: [p] proxy)  [[]/[]] resize split  [t] smassh  [T] kitty terminal  [docker: g=start x=stop r=restart i=images]  [images: r=run x=remove i=inspect p=prune]  [hub: live search  enter/p=pull r=run]  [projects: ↑↓ select enter=term o=opencode h=hermes l=claude k=codex m=ai-menu]  [github: a:clone c:commit p:pull u:push s:status f:fetch l:log]"
 	footer := footerStyle.Width(max(10, m.width-2)).Render(footerText)
 
 	if m.noteOpen {
