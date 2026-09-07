@@ -1645,11 +1645,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			availableHeight -= 6
-			if availableHeight < 5 {
-				availableHeight = 5
+			availableHeight -= 3
+			if availableHeight < 8 {
+				availableHeight = 8
 			}
-			m.noteInput.SetHeight(5)
+			m.noteInput.SetHeight(10)
 		}
 
 		listWidth := m.width - 4
@@ -2682,7 +2682,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.noteInput.SetHeight(max(3, availableHeight))
 				} else {
-					m.noteInput.SetHeight(5)
+					m.noteInput.SetHeight(10)
 				}
 				return m, nil
 
@@ -3721,7 +3721,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.noteOpen = !m.noteOpen
 			if m.noteOpen {
 				m.noteFullscreen = false
-				m.noteInput.SetHeight(5)
+				m.noteInput.SetHeight(10)
 				m.noteInput.Focus()
 
 				// Update border color when opening notes
